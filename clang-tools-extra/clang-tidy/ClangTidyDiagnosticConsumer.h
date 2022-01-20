@@ -29,6 +29,7 @@ class CompilationDatabase;
 } // namespace tooling
 
 namespace tidy {
+class CachedGlobList;
 
 /// A detected error complete with information to display diagnostic and
 /// automatic fix.
@@ -191,7 +192,7 @@ private:
 
   std::string CurrentFile;
   ClangTidyOptions CurrentOptions;
-  class CachedGlobList;
+
   std::unique_ptr<CachedGlobList> CheckFilter;
   std::unique_ptr<CachedGlobList> WarningAsErrorFilter;
 
@@ -240,14 +241,12 @@ getFixIt(const tooling::Diagnostic &Diagnostic, bool AnyFix);
 
 /// A diagnostic consumer that turns each \c Diagnostic into a
 /// \c SourceManager-independent \c ClangTidyError.
-///
-/// \param EnableNolintBlocks Enables diagnostic-disabling inside blocks of
-/// code, delimited by NOLINTBEGIN and NOLINTEND.
-//
 // FIXME: If we move away from unit-tests, this can be moved to a private
 // implementation file.
 class ClangTidyDiagnosticConsumer : public DiagnosticConsumer {
 public:
+  /// \param EnableNolintBlocks Enables diagnostic-disabling inside blocks of
+  /// code, delimited by NOLINTBEGIN and NOLINTEND.
   ClangTidyDiagnosticConsumer(ClangTidyContext &Ctx,
                               DiagnosticsEngine *ExternalDiagEngine = nullptr,
                               bool RemoveIncompatibleErrors = true,

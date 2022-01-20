@@ -31,6 +31,15 @@ define void @test_store(i8* %p) {
   ret void
 }
 
+@G = external global i8*
+; CHECK: define i8 @test_store_capture(i8* %p)
+define i8 @test_store_capture(i8* %p) {
+  store i8* %p, i8** @G
+  %p2 = load i8*, i8** @G
+  %v = load i8, i8* %p2
+  ret i8 %v
+}
+
 ; CHECK: define void @test_addressing(i8* nocapture writeonly %p)
 define void @test_addressing(i8* %p) {
   %gep = getelementptr i8, i8* %p, i64 8
@@ -69,35 +78,49 @@ define void @direct1(i8* %p) {
 
 declare void @direct2_callee(i8* %p) writeonly
 
+; writeonly w/o nocapture is not enough
 ; CHECK: define void @direct2(i8* %p)
 define void @direct2(i8* %p) {
   call void @direct2_callee(i8* %p)
+  ; read back from global, read through pointer...
   ret void
 }
 
-declare void @direct3_callee(i8* writeonly %p)
+; CHECK: define void @direct2b(i8* nocapture writeonly %p)
+define void @direct2b(i8* %p) {
+  call void @direct2_callee(i8* nocapture %p)
+  ret void
+}
 
-; CHECK: define void @direct3(i8* %p)
+declare void @direct3_callee(i8* nocapture writeonly %p)
+
+; CHECK: define void @direct3(i8* nocapture writeonly %p)
 define void @direct3(i8* %p) {
   call void @direct3_callee(i8* %p)
   ret void
 }
 
-; CHECK: define void @fptr_test1(i8* %p, void (i8*)* nocapture %f)
+; CHECK: define void @direct3b(i8* %p)
+define void @direct3b(i8* %p) {
+  call void @direct3_callee(i8* %p) ["may-read-and-capture"(i8* %p)]
+  ret void
+}
+
+; CHECK: define void @fptr_test1(i8* %p, void (i8*)* nocapture readonly %f)
 define void @fptr_test1(i8* %p, void (i8*)* %f) {
   call void %f(i8* %p)
   ret void
 }
 
-; CHECK: define void @fptr_test2(i8* %p, void (i8*)* nocapture %f)
+; CHECK: define void @fptr_test2(i8* nocapture writeonly %p, void (i8*)* nocapture readonly %f)
 define void @fptr_test2(i8* %p, void (i8*)* %f) {
-  call void %f(i8* writeonly %p)
+  call void %f(i8* nocapture writeonly %p)
   ret void
 }
 
-; CHECK: define void @fptr_test3(i8* %p, void (i8*)* nocapture %f)
+; CHECK: define void @fptr_test3(i8* nocapture writeonly %p, void (i8*)* nocapture readonly %f)
 define void @fptr_test3(i8* %p, void (i8*)* %f) {
-  call void %f(i8* %p) writeonly
+  call void %f(i8* nocapture %p) writeonly
   ret void
 }
 

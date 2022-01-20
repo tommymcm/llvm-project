@@ -107,11 +107,6 @@ static cl::opt<bool> ControlFlowHoisting(
     "licm-control-flow-hoisting", cl::Hidden, cl::init(false),
     cl::desc("Enable control flow (and PHI) hoisting in LICM"));
 
-static cl::opt<unsigned> HoistSinkColdnessThreshold(
-    "licm-coldness-threshold", cl::Hidden, cl::init(4),
-    cl::desc("Relative coldness Threshold of hoisting/sinking destination "
-             "block for LICM to be considered beneficial"));
-
 static cl::opt<uint32_t> MaxNumUsesTraversed(
     "licm-max-num-uses-traversed", cl::Hidden, cl::init(8),
     cl::desc("Max num uses visited for identifying load "
@@ -819,35 +814,6 @@ public:
 };
 } // namespace
 
-// Hoisting/sinking instruction out of a loop isn't always beneficial. It's only
-// only worthwhile if the destination block is actually colder than current
-// block.
-static bool worthSinkOrHoistInst(Instruction &I, BasicBlock *DstBlock,
-                                 OptimizationRemarkEmitter *ORE,
-                                 BlockFrequencyInfo *BFI) {
-  // Check block frequency only when runtime profile is available
-  // to avoid pathological cases. With static profile, lean towards
-  // hosting because it helps canonicalize the loop for vectorizer.
-  if (!DstBlock->getParent()->hasProfileData())
-    return true;
-
-  if (!HoistSinkColdnessThreshold || !BFI)
-    return true;
-
-  BasicBlock *SrcBlock = I.getParent();
-  if (BFI->getBlockFreq(DstBlock).getFrequency() / HoistSinkColdnessThreshold >
-      BFI->getBlockFreq(SrcBlock).getFrequency()) {
-    ORE->emit([&]() {
-      return OptimizationRemarkMissed(DEBUG_TYPE, "SinkHoistInst", &I)
-             << "failed to sink or hoist instruction because containing block "
-                "has lower frequency than destination block";
-    });
-    return false;
-  }
-
-  return true;
-}
-
 /// Walk the specified region of the CFG (defined by all blocks dominated by
 /// the specified block, and that are in the current loop) in depth first
 /// order w.r.t the DominatorTree.  This allows us to visit definitions before
@@ -909,7 +875,6 @@ bool llvm::hoistRegion(DomTreeNode *N, AAResults *AA, LoopInfo *LI,
       if (CurLoop->hasLoopInvariantOperands(&I) &&
           canSinkOrHoistInst(I, AA, DT, CurLoop, /*CurAST*/ nullptr, MSSAU,
                              true, &Flags, ORE) &&
-          worthSinkOrHoistInst(I, CurLoop->getLoopPreheader(), ORE, BFI) &&
           isSafeToExecuteUnconditionally(
               I, DT, TLI, CurLoop, SafetyInfo, ORE,
               CurLoop->getLoopPreheader()->getTerminator())) {
@@ -1390,7 +1355,7 @@ static bool isFreeInLoop(const Instruction &I, const Loop *CurLoop,
         TargetTransformInfo::TCC_Free)
       return false;
     // For a GEP, we cannot simply use getUserCost because currently it
-    // optimistically assume that a GEP will fold into addressing mode
+    // optimistically assumes that a GEP will fold into addressing mode
     // regardless of its users.
     const BasicBlock *BB = GEP->getParent();
     for (const User *U : GEP->users()) {
@@ -1741,7 +1706,6 @@ static bool sink(Instruction &I, LoopInfo *LI, DominatorTree *DT,
   // First check if I is worth sinking for all uses. Sink only when it is worth
   // across all uses.
   SmallSetVector<User*, 8> Users(I.user_begin(), I.user_end());
-  SmallVector<PHINode *, 8> ExitPNs;
   for (auto *UI : Users) {
     auto *User = cast<Instruction>(UI);
 
@@ -1751,14 +1715,6 @@ static bool sink(Instruction &I, LoopInfo *LI, DominatorTree *DT,
     PHINode *PN = cast<PHINode>(User);
     assert(ExitBlockSet.count(PN->getParent()) &&
            "The LCSSA PHI is not in an exit block!");
-    if (!worthSinkOrHoistInst(I, PN->getParent(), ORE, BFI)) {
-      return Changed;
-    }
-
-    ExitPNs.push_back(PN);
-  }
-
-  for (auto *PN : ExitPNs) {
 
     // The PHI must be trivially replaceable.
     Instruction *New = sinkThroughTriviallyReplaceablePHI(
@@ -1967,10 +1923,9 @@ bool isNotCapturedBeforeOrInLoop(const Value *V, const Loop *L,
                                      L->getHeader()->getTerminator(), DT);
 }
 
-/// Return true iff we can prove that a caller of this function can not inspect
-/// the contents of the provided object in a well defined program.
-bool isKnownNonEscaping(Value *Object, const Loop *L,
-                        const TargetLibraryInfo *TLI, DominatorTree *DT) {
+/// Return true if we can prove that a caller cannot inspect the object if an
+/// unwind occurs inside the loop.
+bool isNotVisibleOnUnwind(Value *Object, const Loop *L, DominatorTree *DT) {
   if (isa<AllocaInst>(Object))
     // Since the alloca goes out of scope, we know the caller can't retain a
     // reference to it and be well defined.  Thus, we don't need to check for
@@ -1978,16 +1933,13 @@ bool isKnownNonEscaping(Value *Object, const Loop *L,
     return true;
 
   // For all other objects we need to know that the caller can't possibly
-  // have gotten a reference to the object.  There are two components of
-  // that:
-  //   1) Object can't be escaped by this function.  This is what
-  //      PointerMayBeCaptured checks.
-  //   2) Object can't have been captured at definition site.  For this, we
-  //      need to know the return value is noalias.  At the moment, we use a
-  //      weaker condition and handle only AllocLikeFunctions (which are
-  //      known to be noalias).  TODO
-  return isAllocLikeFn(Object, TLI) &&
-         isNotCapturedBeforeOrInLoop(Object, L, DT);
+  // have gotten a reference to the object prior to an unwind in the loop.
+  // There are two components of that:
+  //   1) Object can't have been captured prior to the definition site.
+  //      For this, we need to know the return value is noalias.
+  //   1) Object can't be captured before or inside the loop.  This is what
+  //      isNotCapturedBeforeOrInLoop() checks.
+  return isNoAliasCall(Object) && isNotCapturedBeforeOrInLoop(Object, L, DT);
 }
 
 } // namespace
@@ -2074,7 +2026,7 @@ bool llvm::promoteLoopAccessesToScalars(
     // this by proving that the caller can't have a reference to the object
     // after return and thus can't possibly load from the object.
     Value *Object = getUnderlyingObject(SomePtr);
-    if (!isKnownNonEscaping(Object, CurLoop, TLI, DT))
+    if (!isNotVisibleOnUnwind(Object, CurLoop, DT))
       return false;
     // Subtlety: Alloca's aren't visible to callers, but *are* potentially
     // visible to other threads if captured and used during their lifetimes.
@@ -2207,7 +2159,7 @@ bool llvm::promoteLoopAccessesToScalars(
     else {
       Value *Object = getUnderlyingObject(SomePtr);
       SafeToInsertStore =
-          (isAllocLikeFn(Object, TLI) || isa<AllocaInst>(Object)) &&
+          (isNoAliasCall(Object) || isa<AllocaInst>(Object)) &&
           isNotCapturedBeforeOrInLoop(Object, CurLoop, DT);
     }
   }

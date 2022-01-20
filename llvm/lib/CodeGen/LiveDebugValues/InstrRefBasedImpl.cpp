@@ -251,9 +251,10 @@ public:
   /// creates DBG_VALUEs and puts them in #Transfers, then prepares the other
   /// object fields to track variable locations as we step through the block.
   /// FIXME: could just examine mloctracker instead of passing in \p mlocs?
-  void loadInlocs(MachineBasicBlock &MBB, ValueIDNum *MLocs,
-                  SmallVectorImpl<std::pair<DebugVariable, DbgValue>> &VLocs,
-                  unsigned NumLocs) {
+  void
+  loadInlocs(MachineBasicBlock &MBB, ValueIDNum *MLocs,
+             const SmallVectorImpl<std::pair<DebugVariable, DbgValue>> &VLocs,
+             unsigned NumLocs) {
     ActiveMLocs.clear();
     ActiveVLocs.clear();
     VarLocs.clear();
@@ -272,7 +273,7 @@ public:
     };
 
     // Map of the preferred location for each value.
-    std::map<ValueIDNum, LocIdx> ValueToLoc;
+    DenseMap<ValueIDNum, LocIdx> ValueToLoc;
     ActiveMLocs.reserve(VLocs.size());
     ActiveVLocs.reserve(VLocs.size());
 
@@ -283,6 +284,11 @@ public:
       LocIdx Idx = Location.Idx;
       ValueIDNum &VNum = MLocs[Idx.asU64()];
       VarLocs.push_back(VNum);
+
+      // Short-circuit unnecessary preferred location update.
+      if (VLocs.empty())
+        continue;
+
       auto it = ValueToLoc.find(VNum);
       // In order of preference, pick:
       //  * Callee saved registers,
@@ -298,7 +304,7 @@ public:
     }
 
     // Now map variables to their picked LocIdxes.
-    for (auto Var : VLocs) {
+    for (const auto &Var : VLocs) {
       if (Var.second.Kind == DbgValue::Const) {
         PendingDbgValues.push_back(
             emitMOLoc(*Var.second.MO, Var.first, Var.second.Properties));
@@ -413,7 +419,8 @@ public:
     return Reg != SP && Reg != FP;
   }
 
-  bool recoverAsEntryValue(const DebugVariable &Var, DbgValueProperties &Prop,
+  bool recoverAsEntryValue(const DebugVariable &Var,
+                           const DbgValueProperties &Prop,
                            const ValueIDNum &Num) {
     // Is this variable location a candidate to be an entry value. First,
     // should we be trying this at all?
@@ -1249,8 +1256,8 @@ bool InstrRefBasedLDV::transferDebugPHI(MachineInstr &MI) {
     std::array<unsigned, 4> CandidateSizes = {64, 32, 16, 8};
     Optional<ValueIDNum> Result = None;
     Optional<LocIdx> SpillLoc = None;
-    for (unsigned int I = 0; I < CandidateSizes.size(); ++I) {
-      unsigned SpillID = MTracker->getLocID(SpillNo, {CandidateSizes[I], 0});
+    for (unsigned CS : CandidateSizes) {
+      unsigned SpillID = MTracker->getLocID(SpillNo, {CS, 0});
       SpillLoc = MTracker->getSpillMLoc(SpillID);
       ValueIDNum Val = MTracker->readMLoc(*SpillLoc);
       // If this value was defined in it's own position, then it was probably

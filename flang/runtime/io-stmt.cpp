@@ -208,20 +208,30 @@ void OpenStatementState::set_path(const char *path, std::size_t length) {
 }
 
 int OpenStatementState::EndIoStatement() {
+  if (position_) {
+    if (access_ && *access_ == Access::Direct) {
+      SignalError("POSITION= may not be set with ACCESS='DIRECT'");
+      position_.reset();
+    }
+  }
   if (path_.get() || wasExtant_ ||
       (status_ && *status_ == OpenStatus::Scratch)) {
-    unit().OpenUnit(status_, action_, position_, std::move(path_), pathLength_,
-        convert_, *this);
+    unit().OpenUnit(status_, action_, position_.value_or(Position::AsIs),
+        std::move(path_), pathLength_, convert_, *this);
   } else {
-    unit().OpenAnonymousUnit(status_, action_, position_, convert_, *this);
+    unit().OpenAnonymousUnit(
+        status_, action_, position_.value_or(Position::AsIs), convert_, *this);
   }
   if (access_) {
     if (*access_ != unit().access) {
       if (wasExtant_) {
         SignalError("ACCESS= may not be changed on an open unit");
+        access_.reset();
       }
     }
-    unit().access = *access_;
+    if (access_) {
+      unit().access = *access_;
+    }
   }
   if (!unit().isUnformatted) {
     unit().isUnformatted = isUnformatted_;
@@ -888,7 +898,7 @@ bool InquireUnitState::Inquire(
   case HashInquiryKeyword("DIRECT"):
     str = !unit().IsConnected() ? "UNKNOWN"
         : unit().access == Access::Direct ||
-            (unit().mayPosition() && unit().isFixedRecordLength)
+            (unit().mayPosition() && unit().openRecl)
         ? "YES"
         : "NO";
     break;
@@ -1056,8 +1066,8 @@ bool InquireUnitState::Inquire(
       result = -1;
     } else if (unit().access == Access::Stream) {
       result = -2;
-    } else if (unit().isFixedRecordLength && unit().recordLength) {
-      result = *unit().recordLength;
+    } else if (unit().openRecl) {
+      result = *unit().openRecl;
     } else {
       result = std::numeric_limits<std::uint32_t>::max();
     }
@@ -1202,7 +1212,10 @@ bool InquireUnconnectedFileState::Inquire(
     break;
   case HashInquiryKeyword("NAME"):
     str = path_.get();
-    return true;
+    if (!str) {
+      return true; // result is undefined
+    }
+    break;
   }
   if (str) {
     ToFortranDefaultCharacter(result, length, str);

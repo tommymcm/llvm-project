@@ -16,7 +16,6 @@
 
 #define WIN32_LEAN_AND_MEAN
 #define NOGDI
-#include <direct.h>
 #include <windows.h>
 #include <io.h>
 #include <psapi.h>
@@ -571,7 +570,9 @@ void Abort() {
   internal__exit(3);
 }
 
-bool CreateDir(const char *pathname) { return _mkdir(pathname) == 0; }
+bool CreateDir(const char *pathname) {
+  return CreateDirectoryA(pathname, nullptr) != 0;
+}
 
 #if !SANITIZER_GO
 // Read the file to extract the ImageBase field from the PE header. If ASLR is
@@ -949,13 +950,18 @@ void SignalContext::InitPcSpBp() {
   CONTEXT *context_record = (CONTEXT *)context;
 
   pc = (uptr)exception_record->ExceptionAddress;
-#ifdef _WIN64
+#  if SANITIZER_WINDOWS64
+#    if SANITIZER_ARM64
+  bp = (uptr)context_record->Fp;
+  sp = (uptr)context_record->Sp;
+#    else
   bp = (uptr)context_record->Rbp;
   sp = (uptr)context_record->Rsp;
-#else
+#    endif
+#  else
   bp = (uptr)context_record->Ebp;
   sp = (uptr)context_record->Esp;
-#endif
+#  endif
 }
 
 uptr SignalContext::GetAddress() const {
