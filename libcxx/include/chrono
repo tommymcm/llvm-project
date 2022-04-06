@@ -694,6 +694,7 @@ constexpr chrono::year                                  operator ""y(unsigned lo
 }  // std
 */
 
+#include <__assert> // all public C++ headers provide the assertion handler
 #include <__chrono/calendar.h>
 #include <__chrono/convert_to_timespec.h>
 #include <__chrono/duration.h>
@@ -707,7 +708,7 @@ constexpr chrono::year                                  operator ""y(unsigned lo
 #include <version>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
-#pragma GCC system_header
+#  pragma GCC system_header
 #endif
 
 #endif // _LIBCPP_CHRONO

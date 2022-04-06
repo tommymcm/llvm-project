@@ -165,11 +165,12 @@ tools.extend([
     'llvm-link', 'llvm-lto', 'llvm-lto2', 'llvm-mc', 'llvm-mca',
     'llvm-modextract', 'llvm-nm', 'llvm-objcopy', 'llvm-objdump', 'llvm-otool',
     'llvm-pdbutil', 'llvm-profdata', 'llvm-profgen', 'llvm-ranlib', 'llvm-rc', 'llvm-readelf',
-    'llvm-readobj', 'llvm-rtdyld', 'llvm-sim', 'llvm-size', 'llvm-split',
-    'llvm-stress', 'llvm-strings', 'llvm-strip', 'llvm-tblgen', 'llvm-tapi-diff',
-    'llvm-undname', 'llvm-windres', 'llvm-c-test', 'llvm-cxxfilt',
-    'llvm-xray', 'yaml2obj', 'obj2yaml', 'yaml-bench', 'verify-uselistorder',
-    'bugpoint', 'llc', 'llvm-symbolizer', 'opt', 'sancov', 'sanstats'])
+    'llvm-readobj', 'llvm-remark-size-diff', 'llvm-rtdyld', 'llvm-sim',
+    'llvm-size', 'llvm-split', 'llvm-stress', 'llvm-strings', 'llvm-strip',
+    'llvm-tblgen', 'llvm-tapi-diff', 'llvm-undname', 'llvm-windres',
+    'llvm-c-test', 'llvm-cxxfilt', 'llvm-xray', 'yaml2obj', 'obj2yaml',
+    'yaml-bench', 'verify-uselistorder', 'bugpoint', 'llc', 'llvm-symbolizer',
+    'opt', 'sancov', 'sanstats'])
 
 # The following tools are optional
 tools.extend([
@@ -293,14 +294,13 @@ if have_cxx_shared_library():
 if config.libcxx_used:
     config.available_features.add('libcxx-used')
 
-# Direct object generation
-if not 'xcore' in config.target_triple:
-    config.available_features.add('object-emission')
-
 # LLVM can be configured with an empty default triple
 # Some tests are "generic" and require a valid default triple
 if config.target_triple:
     config.available_features.add('default_triple')
+    # Direct object generation
+    if not config.target_triple.startswith(("nvptx", "xcore")):
+        config.available_features.add('object-emission')
 
 import subprocess
 
@@ -405,6 +405,9 @@ if config.have_opt_viewer_modules:
 
 if config.expensive_checks:
     config.available_features.add('expensive_checks')
+
+if config.abi_breaking_checks:
+    config.available_features.add('abi_breaking_checks')
 
 if "MemoryWithOrigins" in config.llvm_use_sanitizer:
     config.available_features.add('use_msan_with_origins')

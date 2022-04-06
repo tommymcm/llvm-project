@@ -14,7 +14,6 @@
 #ifndef LLVM_LIB_IR_LLVMCONTEXTIMPL_H
 #define LLVM_LIB_IR_LLVMCONTEXTIMPL_H
 
-#include "AttributeImpl.h"
 #include "ConstantsContext.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
@@ -34,13 +33,14 @@
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/LLVMRemarkStreamer.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/TrackingMDRef.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/StringSaver.h"
-#include "llvm/Support/YAMLTraits.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -52,9 +52,23 @@
 
 namespace llvm {
 
+class AttributeImpl;
+class AttributeListImpl;
+class AttributeSetNode;
+class BasicBlock;
+struct DiagnosticHandler;
+class ElementCount;
+class Function;
+class GlobalObject;
+class GlobalValue;
+class InlineAsm;
+class LLVMRemarkStreamer;
+class OptPassGate;
+namespace remarks {
+class RemarkStreamer;
+}
+template <typename T> class StringMapEntry;
 class StringRef;
-class Type;
-class Value;
 class ValueHandleBase;
 
 using DenseMapAPIntKeyInfo = DenseMapInfo<APInt>;
@@ -428,20 +442,22 @@ template <> struct MDNodeKeyImpl<DIStringType> {
   MDString *Name;
   Metadata *StringLength;
   Metadata *StringLengthExp;
+  Metadata *StringLocationExp;
   uint64_t SizeInBits;
   uint32_t AlignInBits;
   unsigned Encoding;
 
   MDNodeKeyImpl(unsigned Tag, MDString *Name, Metadata *StringLength,
-                Metadata *StringLengthExp, uint64_t SizeInBits,
-                uint32_t AlignInBits, unsigned Encoding)
+                Metadata *StringLengthExp, Metadata *StringLocationExp,
+                uint64_t SizeInBits, uint32_t AlignInBits, unsigned Encoding)
       : Tag(Tag), Name(Name), StringLength(StringLength),
-        StringLengthExp(StringLengthExp), SizeInBits(SizeInBits),
-        AlignInBits(AlignInBits), Encoding(Encoding) {}
+        StringLengthExp(StringLengthExp), StringLocationExp(StringLocationExp),
+        SizeInBits(SizeInBits), AlignInBits(AlignInBits), Encoding(Encoding) {}
   MDNodeKeyImpl(const DIStringType *N)
       : Tag(N->getTag()), Name(N->getRawName()),
         StringLength(N->getRawStringLength()),
         StringLengthExp(N->getRawStringLengthExp()),
+        StringLocationExp(N->getRawStringLocationExp()),
         SizeInBits(N->getSizeInBits()), AlignInBits(N->getAlignInBits()),
         Encoding(N->getEncoding()) {}
 
@@ -1370,6 +1386,8 @@ public:
   LLVMContext::YieldCallbackTy YieldCallback = nullptr;
   void *YieldOpaqueHandle = nullptr;
 
+  DenseMap<const Value *, ValueName *> ValueNames;
+
   using IntMapTy =
       DenseMap<APInt, std::unique_ptr<ConstantInt>, DenseMapAPIntKeyInfo>;
   IntMapTy IntConstants;
@@ -1385,8 +1403,6 @@ public:
   StringMap<MDString, BumpPtrAllocator> MDStringCache;
   DenseMap<Value *, ValueAsMetadata *> ValuesAsMetadata;
   DenseMap<Metadata *, MetadataAsValue *> MetadataAsValues;
-
-  DenseMap<const Value *, ValueName *> ValueNames;
 
 #define HANDLE_MDNODE_LEAF_UNIQUABLE(CLASS)                                    \
   DenseSet<CLASS *, CLASS##Info> CLASS##s;
@@ -1539,6 +1555,7 @@ public:
   // TODO: clean up the following after we no longer support non-opaque pointer
   // types.
   bool getOpaquePointers();
+  bool hasOpaquePointersValue();
   void setOpaquePointers(bool OP);
 
 private:

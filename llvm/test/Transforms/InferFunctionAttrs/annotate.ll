@@ -3,6 +3,7 @@
 ; RUN: opt < %s -mtriple=x86_64-apple-macosx10.8.0 -inferattrs -S | FileCheck --match-full-lines --check-prefixes=CHECK,CHECK-KNOWN,CHECK-NOLINUX,CHECK-OPEN,CHECK-DARWIN %s
 ; RUN: opt < %s -mtriple=x86_64-unknown-linux-gnu -inferattrs -S | FileCheck --match-full-lines --check-prefixes=CHECK,CHECK-KNOWN,CHECK-LINUX %s
 ; RUN: opt < %s -mtriple=nvptx -inferattrs -S | FileCheck --match-full-lines --check-prefixes=CHECK-NOLINUX,CHECK-NVPTX %s
+; RUN: opt < %s -mtriple=s390x-linux-gnu -inferattrs -S | FileCheck --check-prefixes=CHECK-SYSTEMZ %s
 
 declare i32 @__nvvm_reflect(i8*)
 ; CHECK-NVPTX: declare noundef i32 @__nvvm_reflect(i8* noundef) [[NOFREE_NOUNWIND_READNONE:#[0-9]+]]
@@ -219,7 +220,7 @@ declare x86_fp80 @acoshl(x86_fp80)
 ; CHECK: declare x86_fp80 @acosl(x86_fp80) [[NOFREE_NOUNWIND_WILLRETURN_WRITEONLY]]
 declare x86_fp80 @acosl(x86_fp80)
 
-; CHECK: declare noalias noundef i8* @aligned_alloc(i64 noundef, i64 noundef) [[INACCESSIBLEMEMONLY_NOFREE_NOUNWIND:#[0-9]+]]
+; CHECK: declare noalias noundef i8* @aligned_alloc(i64 allocalign noundef, i64 noundef) [[INACCESSIBLEMEMONLY_NOFREE_NOUNWIND_WILLRETURN:#[0-9]+]]
 declare i8* @aligned_alloc(i64, i64)
 
 ; CHECK: declare double @asin(double) [[NOFREE_NOUNWIND_WILLRETURN_WRITEONLY]]
@@ -590,13 +591,15 @@ declare i64 @labs(i64)
 ; CHECK: declare noundef i32 @lchown(i8* nocapture noundef readonly, i32 noundef, i32 noundef) [[NOFREE_NOUNWIND]]
 declare i32 @lchown(i8*, i32, i32)
 
-; CHECK: declare double @ldexp(double, i32 signext) [[NOFREE_WILLRETURN:#[0-9]+]]
+; CHECK: declare double @ldexp(double, i32) [[NOFREE_WILLRETURN:#[0-9]+]]
+; CHECK-SYSTEMZ: declare double @ldexp(double, i32 signext)
 declare double @ldexp(double, i32)
 
-; CHECK: declare float @ldexpf(float, i32 signext) [[NOFREE_WILLRETURN]]
+; CHECK: declare float @ldexpf(float, i32) [[NOFREE_WILLRETURN]]
+; CHECK-SYSTEMZ: declare float @ldexpf(float, i32 signext)
 declare float @ldexpf(float, i32)
 
-; CHECK: declare x86_fp80 @ldexpl(x86_fp80, i32 signext) [[NOFREE_WILLRETURN]]
+; CHECK: declare x86_fp80 @ldexpl(x86_fp80, i32) [[NOFREE_WILLRETURN]]
 declare x86_fp80 @ldexpl(x86_fp80, i32)
 
 ; CHECK: declare i64 @llabs(i64) [[NOFREE_NOUNWIND_WILLRETURN_WRITEONLY]]
@@ -656,7 +659,7 @@ declare i32 @lstat64(i8*, %opaque*)
 ; CHECK: declare noalias noundef i8* @malloc(i64 noundef) [[INACCESSIBLEMEMONLY_NOFREE_NOUNWIND_WILLRETURN]]
 declare i8* @malloc(i64)
 
-; CHECK-LINUX: declare noalias noundef i8* @memalign(i64, i64) [[INACCESSIBLEMEMONLY_NOFREE_NOUNWIND_WILLRETURN]]
+; CHECK-LINUX: declare noalias noundef i8* @memalign(i64 allocalign, i64) [[INACCESSIBLEMEMONLY_NOFREE_NOUNWIND_WILLRETURN:#[0-9]+]]
 declare i8* @memalign(i64, i64)
 
 ; CHECK: declare i8* @memccpy(i8* noalias writeonly, i8* noalias nocapture readonly, i32, i64) [[ARGMEMONLY_NOFREE_NOUNWIND_WILLRETURN]]
@@ -753,10 +756,12 @@ declare i32 @printf(i8*, ...)
 declare i32 @putc(i32, %opaque*)
 
 ; CHECK: declare noundef i32 @putchar(i32 noundef) [[NOFREE_NOUNWIND]]
+; CHECK-SYSTEMZ: declare noundef i32 @putchar(i32 noundef signext)
 declare i32 @putchar(i32)
 
 ; CHECK-KNOWN: declare noundef i32 @putchar_unlocked(i32 noundef) [[NOFREE_NOUNWIND]]
 ; CHECK-UNKNOWN: declare i32 @putchar_unlocked(i32){{$}}
+; CHECK-SYSTEMZ: declare noundef i32 @putchar_unlocked(i32 noundef signext)
 declare i32 @putchar_unlocked(i32)
 
 ; CHECK: declare noundef i32 @puts(i8* nocapture noundef readonly) [[NOFREE_NOUNWIND]]

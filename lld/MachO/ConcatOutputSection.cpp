@@ -13,8 +13,7 @@
 #include "Symbols.h"
 #include "SyntheticSections.h"
 #include "Target.h"
-#include "lld/Common/ErrorHandler.h"
-#include "lld/Common/Memory.h"
+#include "lld/Common/CommonLinkerContext.h"
 #include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/TimeProfiler.h"
@@ -58,14 +57,14 @@ void ConcatOutputSection::addInput(ConcatInputSection *input) {
 // implement thunks. TODO: Adding support for branch islands!
 //
 // Internally -- as expressed in LLD's data structures -- a
-// branch-range-extension thunk comprises ...
+// branch-range-extension thunk consists of:
 //
-// (1) new Defined privateExtern symbol for the thunk named
+// (1) new Defined symbol for the thunk named
 //     <FUNCTION>.thunk.<SEQUENCE>, which references ...
 // (2) new InputSection, which contains ...
 // (3.1) new data for the instructions to load & branch to the far address +
 // (3.2) new Relocs on instructions to load the far address, which reference ...
-// (4.1) existing Defined extern symbol for the real function in __text, or
+// (4.1) existing Defined symbol for the real function in __text, or
 // (4.2) existing DylibSymbol for the real function in a dylib
 //
 // Nearly-optimal thunk-placement algorithm features:
@@ -85,15 +84,17 @@ void ConcatOutputSection::addInput(ConcatInputSection *input) {
 //   distant call sites might be unable to reach the same thunk, so multiple
 //   thunks are necessary to serve all call sites in a very large program. A
 //   thunkInfo stores state for all thunks associated with a particular
-//   function: (a) thunk symbol, (b) input section containing stub code, and
-//   (c) sequence number for the active thunk incarnation. When an old thunk
-//   goes out of range, we increment the sequence number and create a new
-//   thunk named <FUNCTION>.thunk.<SEQUENCE>.
+//   function:
+//     (a) thunk symbol
+//     (b) input section containing stub code, and
+//     (c) sequence number for the active thunk incarnation.
+//   When an old thunk goes out of range, we increment the sequence number and
+//   create a new thunk named <FUNCTION>.thunk.<SEQUENCE>.
 //
-// * A thunk incarnation comprises (a) private-extern Defined symbol pointing
-//   to (b) an InputSection holding machine instructions (similar to a MachO
-//   stub), and (c) Reloc(s) that reference the real function for fixing-up
-//   the stub code.
+// * A thunk consists of
+//     (a) a Defined symbol pointing to
+//     (b) an InputSection holding machine code (similar to a MachO stub), and
+//     (c) relocs referencing the real function for fixing up the stub code.
 //
 // * std::vector<InputSection *> MergedInputSection::thunks: A vector parallel
 //   to the inputs vector. We store new thunks via cheap vector append, rather
@@ -314,7 +315,7 @@ void ConcatOutputSection::finalize() {
         fatal(Twine(__FUNCTION__) + ": FIXME: thunk range overrun");
       }
       thunkInfo.isec =
-          make<ConcatInputSection>(isec->getSegName(), isec->getName());
+          makeSyntheticInputSection(isec->getSegName(), isec->getName());
       thunkInfo.isec->parent = this;
 
       // This code runs after dead code removal. Need to set the `live` bit
@@ -322,13 +323,22 @@ void ConcatOutputSection::finalize() {
       // get written are happy.
       thunkInfo.isec->live = true;
 
-      StringRef thunkName = saver.save(funcSym->getName() + ".thunk." +
-                                       std::to_string(thunkInfo.sequence++));
-      r.referent = thunkInfo.sym = symtab->addDefined(
-          thunkName, /*file=*/nullptr, thunkInfo.isec, /*value=*/0,
-          /*size=*/thunkSize, /*isWeakDef=*/false, /*isPrivateExtern=*/true,
-          /*isThumb=*/false, /*isReferencedDynamically=*/false,
-          /*noDeadStrip=*/false, /*isWeakDefCanBeHidden=*/false);
+      StringRef thunkName = saver().save(funcSym->getName() + ".thunk." +
+                                         std::to_string(thunkInfo.sequence++));
+      if (!isa<Defined>(funcSym) || cast<Defined>(funcSym)->isExternal()) {
+        r.referent = thunkInfo.sym = symtab->addDefined(
+            thunkName, /*file=*/nullptr, thunkInfo.isec, /*value=*/0,
+            thunkSize, /*isWeakDef=*/false, /*isPrivateExtern=*/true,
+            /*isThumb=*/false, /*isReferencedDynamically=*/false,
+            /*noDeadStrip=*/false, /*isWeakDefCanBeHidden=*/false);
+      } else {
+        r.referent = thunkInfo.sym = make<Defined>(
+            thunkName, /*file=*/nullptr, thunkInfo.isec, /*value=*/0,
+            thunkSize, /*isWeakDef=*/false, /*isExternal=*/false,
+            /*isPrivateExtern=*/true, /*isThumb=*/false,
+            /*isReferencedDynamically=*/false, /*noDeadStrip=*/false,
+            /*isWeakDefCanBeHidden=*/false);
+      }
       thunkInfo.sym->used = true;
       target->populateThunk(thunkInfo.isec, funcSym);
       finalizeOne(thunkInfo.isec);

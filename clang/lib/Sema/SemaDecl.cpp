@@ -1460,27 +1460,38 @@ void Sema::ActOnExitFunctionContext() {
   assert(CurContext && "Popped translation unit!");
 }
 
-/// Determine whether we allow overloading of the function
-/// PrevDecl with another declaration.
+/// Determine whether overloading is allowed for a new function
+/// declaration considering prior declarations of the same name.
 ///
 /// This routine determines whether overloading is possible, not
-/// whether some new function is actually an overload. It will return
-/// true in C++ (where we can always provide overloads) or, as an
-/// extension, in C when the previous function is already an
-/// overloaded function declaration or has the "overloadable"
-/// attribute.
-static bool AllowOverloadingOfFunction(LookupResult &Previous,
+/// whether a new declaration actually overloads a previous one.
+/// It will return true in C++ (where overloads are alway permitted)
+/// or, as a C extension, when either the new declaration or a
+/// previous one is declared with the 'overloadable' attribute.
+static bool AllowOverloadingOfFunction(const LookupResult &Previous,
                                        ASTContext &Context,
                                        const FunctionDecl *New) {
-  if (Context.getLangOpts().CPlusPlus)
+  if (Context.getLangOpts().CPlusPlus || New->hasAttr<OverloadableAttr>())
     return true;
 
-  if (Previous.getResultKind() == LookupResult::FoundOverloaded)
-    return true;
+  // Multiversion function declarations are not overloads in the
+  // usual sense of that term, but lookup will report that an
+  // overload set was found if more than one multiversion function
+  // declaration is present for the same name. It is therefore
+  // inadequate to assume that some prior declaration(s) had
+  // the overloadable attribute; checking is required. Since one
+  // declaration is permitted to omit the attribute, it is necessary
+  // to check at least two; hence the 'any_of' check below. Note that
+  // the overloadable attribute is implicitly added to declarations
+  // that were required to have it but did not.
+  if (Previous.getResultKind() == LookupResult::FoundOverloaded) {
+    return llvm::any_of(Previous, [](const NamedDecl *ND) {
+      return ND->hasAttr<OverloadableAttr>();
+    });
+  } else if (Previous.getResultKind() == LookupResult::Found)
+    return Previous.getFoundDecl()->hasAttr<OverloadableAttr>();
 
-  return Previous.getResultKind() == LookupResult::Found &&
-         (Previous.getFoundDecl()->hasAttr<OverloadableAttr>() ||
-          New->hasAttr<OverloadableAttr>());
+  return false;
 }
 
 /// Add this decl to the scope shadowed decl chains.
@@ -1586,10 +1597,13 @@ void Sema::FilterLookupForScope(LookupResult &R, DeclContext *Ctx, Scope *S,
 /// We've determined that \p New is a redeclaration of \p Old. Check that they
 /// have compatible owning modules.
 bool Sema::CheckRedeclarationModuleOwnership(NamedDecl *New, NamedDecl *Old) {
-  // FIXME: The Modules TS is not clear about how friend declarations are
-  // to be treated. It's not meaningful to have different owning modules for
-  // linkage in redeclarations of the same entity, so for now allow the
-  // redeclaration and change the owning modules to match.
+  // [module.interface]p7:
+  // A declaration is attached to a module as follows:
+  // - If the declaration is a non-dependent friend declaration that nominates a
+  // function with a declarator-id that is a qualified-id or template-id or that
+  // nominates a class other than with an elaborated-type-specifier with neither
+  // a nested-name-specifier nor a simple-template-id, it is attached to the
+  // module to which the friend is attached ([basic.link]).
   if (New->getFriendObjectKind() &&
       Old->getOwningModuleForLinkage() != New->getOwningModuleForLinkage()) {
     New->setLocalOwningModule(Old->getOwningModule());
@@ -1604,6 +1618,14 @@ bool Sema::CheckRedeclarationModuleOwnership(NamedDecl *New, NamedDecl *Old) {
     NewM = NewM->Parent;
   if (OldM && OldM->Kind == Module::PrivateModuleFragment)
     OldM = OldM->Parent;
+
+  // If we have a decl in a module partition, it is part of the containing
+  // module (which is the only thing that can be importing it).
+  if (NewM && OldM &&
+      (OldM->Kind == Module::ModulePartitionInterface ||
+       OldM->Kind == Module::ModulePartitionImplementation)) {
+    return false;
+  }
 
   if (NewM == OldM)
     return false;
@@ -1624,6 +1646,52 @@ bool Sema::CheckRedeclarationModuleOwnership(NamedDecl *New, NamedDecl *Old) {
     New->setInvalidDecl();
     return true;
   }
+
+  return false;
+}
+
+// [module.interface]p6:
+// A redeclaration of an entity X is implicitly exported if X was introduced by
+// an exported declaration; otherwise it shall not be exported.
+bool Sema::CheckRedeclarationExported(NamedDecl *New, NamedDecl *Old) {
+  // [module.interface]p1:
+  // An export-declaration shall inhabit a namespace scope.
+  //
+  // So it is meaningless to talk about redeclaration which is not at namespace
+  // scope.
+  if (!New->getLexicalDeclContext()
+           ->getNonTransparentContext()
+           ->isFileContext() ||
+      !Old->getLexicalDeclContext()
+           ->getNonTransparentContext()
+           ->isFileContext())
+    return false;
+
+  bool IsNewExported = New->isInExportDeclContext();
+  bool IsOldExported = Old->isInExportDeclContext();
+
+  // It should be irrevelant if both of them are not exported.
+  if (!IsNewExported && !IsOldExported)
+    return false;
+
+  if (IsOldExported)
+    return false;
+
+  assert(IsNewExported);
+
+  Diag(New->getLocation(), diag::err_redeclaration_non_exported) << New;
+  Diag(Old->getLocation(), diag::note_previous_declaration);
+  return true;
+}
+
+// A wrapper function for checking the semantic restrictions of
+// a redeclaration within a module.
+bool Sema::CheckRedeclarationInModule(NamedDecl *New, NamedDecl *Old) {
+  if (CheckRedeclarationModuleOwnership(New, Old))
+    return true;
+
+  if (CheckRedeclarationExported(New, Old))
+    return true;
 
   return false;
 }
@@ -1821,13 +1889,26 @@ static bool ShouldDiagnoseUnusedDecl(const NamedDecl *D) {
   // Types of valid local variables should be complete, so this should succeed.
   if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
 
-    // White-list anything with an __attribute__((unused)) type.
+    const Expr *Init = VD->getInit();
+    if (const auto *Cleanups = dyn_cast_or_null<ExprWithCleanups>(Init))
+      Init = Cleanups->getSubExpr();
+
     const auto *Ty = VD->getType().getTypePtr();
 
     // Only look at the outermost level of typedef.
     if (const TypedefType *TT = Ty->getAs<TypedefType>()) {
+      // Allow anything marked with __attribute__((unused)).
       if (TT->getDecl()->hasAttr<UnusedAttr>())
         return false;
+    }
+
+    // Warn for reference variables whose initializtion performs lifetime
+    // extension.
+    if (const auto *MTE = dyn_cast_or_null<MaterializeTemporaryExpr>(Init)) {
+      if (MTE->getExtendingDecl()) {
+        Ty = VD->getType().getNonReferenceType().getTypePtr();
+        Init = MTE->getSubExpr()->IgnoreImplicitAsWritten();
+      }
     }
 
     // If we failed to complete the type for some reason, or if the type is
@@ -1848,10 +1929,7 @@ static bool ShouldDiagnoseUnusedDecl(const NamedDecl *D) {
         if (!RD->hasTrivialDestructor() && !RD->hasAttr<WarnUnusedAttr>())
           return false;
 
-        if (const Expr *Init = VD->getInit()) {
-          if (const ExprWithCleanups *Cleanups =
-                  dyn_cast<ExprWithCleanups>(Init))
-            Init = Cleanups->getSubExpr();
+        if (Init) {
           const CXXConstructExpr *Construct =
             dyn_cast<CXXConstructExpr>(Init);
           if (Construct && !Construct->isElidable()) {
@@ -1863,10 +1941,16 @@ static bool ShouldDiagnoseUnusedDecl(const NamedDecl *D) {
 
           // Suppress the warning if we don't know how this is constructed, and
           // it could possibly be non-trivial constructor.
-          if (Init->isTypeDependent())
+          if (Init->isTypeDependent()) {
             for (const CXXConstructorDecl *Ctor : RD->ctors())
               if (!Ctor->isTrivial())
                 return false;
+          }
+
+          // Suppress the warning if the constructor is unresolved because
+          // its arguments are dependent.
+          if (isa<CXXUnresolvedConstructExpr>(Init))
+            return false;
         }
       }
     }
@@ -1957,6 +2041,12 @@ void Sema::DiagnoseUnusedButSetDecl(const VarDecl *VD) {
   // be assigned in the block but not used elsewhere for the purpose of lifetime
   // extension.
   if (VD->hasAttr<BlocksAttr>() && Ty->isObjCObjectPointerType())
+    return;
+
+  // Don't warn about Objective-C pointer variables with precise lifetime
+  // semantics; they can be used to ensure ARC releases the object at a known
+  // time, which may mean assignment but no other references.
+  if (VD->hasAttr<ObjCPreciseLifetimeAttr>() && Ty->isObjCObjectPointerType())
     return;
 
   auto iter = RefsMinusAssignments.find(VD);
@@ -2696,6 +2786,9 @@ static bool mergeDeclAttribute(Sema &S, NamedDecl *D,
     NewAttr = S.mergeEnforceTCBLeafAttr(D, *TCBLA);
   else if (const auto *BTFA = dyn_cast<BTFDeclTagAttr>(Attr))
     NewAttr = S.mergeBTFDeclTagAttr(D, *BTFA);
+  else if (const auto *NT = dyn_cast<HLSLNumThreadsAttr>(Attr))
+    NewAttr =
+        S.mergeHLSLNumThreadsAttr(D, *NT, NT->getX(), NT->getY(), NT->getZ());
   else if (Attr->shouldInheritEvenIfAlreadyPresent() || !DeclHasAttr(D, Attr))
     NewAttr = cast<InheritableAttr>(Attr->clone(S.Context));
 
@@ -3390,7 +3483,7 @@ bool Sema::MergeFunctionDecl(FunctionDecl *New, NamedDecl *&OldD,
     }
   }
 
-  if (CheckRedeclarationModuleOwnership(New, Old))
+  if (CheckRedeclarationInModule(New, Old))
     return true;
 
   if (!getLangOpts().CPlusPlus) {
@@ -4269,7 +4362,7 @@ void Sema::MergeVarDecl(VarDecl *New, LookupResult &Previous) {
     return New->setInvalidDecl();
   }
 
-  if (CheckRedeclarationModuleOwnership(New, Old))
+  if (CheckRedeclarationInModule(New, Old))
     return;
 
   // Variables with external linkage are analyzed in FinalizeDeclaratorGroup.
@@ -5654,6 +5747,13 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   return false;
 }
 
+/// Returns true if the declaration is declared in a system header or from a
+/// system macro.
+static bool isFromSystemHeader(SourceManager &SM, const Decl *D) {
+  return SM.isInSystemHeader(D->getLocation()) ||
+         SM.isInSystemMacro(D->getLocation());
+}
+
 void Sema::warnOnReservedIdentifier(const NamedDecl *D) {
   // Avoid warning twice on the same identifier, and don't warn on redeclaration
   // of system decl.
@@ -5661,9 +5761,10 @@ void Sema::warnOnReservedIdentifier(const NamedDecl *D) {
     return;
   ReservedIdentifierStatus Status = D->isReserved(getLangOpts());
   if (Status != ReservedIdentifierStatus::NotReserved &&
-      !Context.getSourceManager().isInSystemHeader(D->getLocation()))
+      !isFromSystemHeader(Context.getSourceManager(), D)) {
     Diag(D->getLocation(), diag::warn_reserved_extern_symbol)
         << D << static_cast<int>(Status);
+  }
 }
 
 Decl *Sema::ActOnDeclarator(Scope *S, Declarator &D) {
@@ -5759,7 +5860,15 @@ bool Sema::diagnoseQualifiedDeclaration(CXXScopeSpec &SS, DeclContext *DC,
     else if (isa<BlockDecl>(Cur))
       Diag(Loc, diag::err_invalid_declarator_in_block)
         << Name << SS.getRange();
-    else
+    else if (isa<ExportDecl>(Cur)) {
+      if (!isa<NamespaceDecl>(DC))
+        Diag(Loc, diag::err_export_non_namespace_scope_name)
+            << Name << SS.getRange();
+      else
+        // The cases that DC is not NamespaceDecl should be handled in
+        // CheckRedeclarationExported.
+        return false;
+    } else
       Diag(Loc, diag::err_invalid_declarator_scope)
       << Name << cast<NamedDecl>(Cur) << cast<NamedDecl>(DC) << SS.getRange();
 
@@ -9047,8 +9156,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
     Diag(D.getIdentifierLoc(), diag::err_function_decl_cmse_ns_call);
 
   SmallVector<TemplateParameterList *, 4> TemplateParamLists;
-  for (TemplateParameterList *TPL : TemplateParamListsRef)
-    TemplateParamLists.push_back(TPL);
+  llvm::append_range(TemplateParamLists, TemplateParamListsRef);
   if (TemplateParameterList *Invented = D.getInventedTemplateParameterList()) {
     if (!TemplateParamLists.empty() &&
         Invented->getDepth() == TemplateParamLists.back()->getDepth())
@@ -9125,6 +9233,13 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       if (isVirtual && Parent->isUnion()) {
         Diag(D.getDeclSpec().getVirtualSpecLoc(), diag::err_virtual_in_union);
         NewFD->setInvalidDecl();
+      }
+      if ((Parent->isClass() || Parent->isStruct()) &&
+          Parent->hasAttr<SYCLSpecialClassAttr>() &&
+          NewFD->getKind() == Decl::Kind::CXXMethod && NewFD->getIdentifier() &&
+          NewFD->getName() == "__init" && D.isFunctionDefinition()) {
+        if (auto *Def = Parent->getDefinition())
+          Def->setInitMethod(true);
       }
     }
 
@@ -10265,14 +10380,14 @@ static bool CheckMultiVersionValue(Sema &S, const FunctionDecl *FD) {
 // Provide a white-list of attributes that are allowed to be combined with
 // multiversion functions.
 static bool AttrCompatibleWithMultiVersion(attr::Kind Kind,
-                                           MultiVersionKind MVType) {
+                                           MultiVersionKind MVKind) {
   // Note: this list/diagnosis must match the list in
   // checkMultiversionAttributesAllSame.
   switch (Kind) {
   default:
     return false;
   case attr::Used:
-    return MVType == MultiVersionKind::Target;
+    return MVKind == MultiVersionKind::Target;
   case attr::NonNull:
   case attr::NoThrow:
     return true;
@@ -10282,10 +10397,10 @@ static bool AttrCompatibleWithMultiVersion(attr::Kind Kind,
 static bool checkNonMultiVersionCompatAttributes(Sema &S,
                                                  const FunctionDecl *FD,
                                                  const FunctionDecl *CausedFD,
-                                                 MultiVersionKind MVType) {
-  const auto Diagnose = [FD, CausedFD, MVType](Sema &S, const Attr *A) {
+                                                 MultiVersionKind MVKind) {
+  const auto Diagnose = [FD, CausedFD, MVKind](Sema &S, const Attr *A) {
     S.Diag(FD->getLocation(), diag::err_multiversion_disallowed_other_attr)
-        << static_cast<unsigned>(MVType) << A;
+        << static_cast<unsigned>(MVKind) << A;
     if (CausedFD)
       S.Diag(CausedFD->getLocation(), diag::note_multiversioning_caused_here);
     return true;
@@ -10295,20 +10410,20 @@ static bool checkNonMultiVersionCompatAttributes(Sema &S,
     switch (A->getKind()) {
     case attr::CPUDispatch:
     case attr::CPUSpecific:
-      if (MVType != MultiVersionKind::CPUDispatch &&
-          MVType != MultiVersionKind::CPUSpecific)
+      if (MVKind != MultiVersionKind::CPUDispatch &&
+          MVKind != MultiVersionKind::CPUSpecific)
         return Diagnose(S, A);
       break;
     case attr::Target:
-      if (MVType != MultiVersionKind::Target)
+      if (MVKind != MultiVersionKind::Target)
         return Diagnose(S, A);
       break;
     case attr::TargetClones:
-      if (MVType != MultiVersionKind::TargetClones)
+      if (MVKind != MultiVersionKind::TargetClones)
         return Diagnose(S, A);
       break;
     default:
-      if (!AttrCompatibleWithMultiVersion(A->getKind(), MVType))
+      if (!AttrCompatibleWithMultiVersion(A->getKind(), MVKind))
         return Diagnose(S, A);
       break;
     }
@@ -10432,7 +10547,7 @@ bool Sema::areMultiversionVariantFunctionsCompatible(
 static bool CheckMultiVersionAdditionalRules(Sema &S, const FunctionDecl *OldFD,
                                              const FunctionDecl *NewFD,
                                              bool CausesMV,
-                                             MultiVersionKind MVType) {
+                                             MultiVersionKind MVKind) {
   if (!S.getASTContext().getTargetInfo().supportsMultiVersioning()) {
     S.Diag(NewFD->getLocation(), diag::err_multiversion_not_supported);
     if (OldFD)
@@ -10440,15 +10555,15 @@ static bool CheckMultiVersionAdditionalRules(Sema &S, const FunctionDecl *OldFD,
     return true;
   }
 
-  bool IsCPUSpecificCPUDispatchMVType =
-      MVType == MultiVersionKind::CPUDispatch ||
-      MVType == MultiVersionKind::CPUSpecific;
+  bool IsCPUSpecificCPUDispatchMVKind =
+      MVKind == MultiVersionKind::CPUDispatch ||
+      MVKind == MultiVersionKind::CPUSpecific;
 
   if (CausesMV && OldFD &&
-      checkNonMultiVersionCompatAttributes(S, OldFD, NewFD, MVType))
+      checkNonMultiVersionCompatAttributes(S, OldFD, NewFD, MVKind))
     return true;
 
-  if (checkNonMultiVersionCompatAttributes(S, NewFD, nullptr, MVType))
+  if (checkNonMultiVersionCompatAttributes(S, NewFD, nullptr, MVKind))
     return true;
 
   // Only allow transition to MultiVersion if it hasn't been used.
@@ -10461,11 +10576,11 @@ static bool CheckMultiVersionAdditionalRules(Sema &S, const FunctionDecl *OldFD,
                           S.PDiag(diag::note_multiversioning_caused_here)),
       PartialDiagnosticAt(NewFD->getLocation(),
                           S.PDiag(diag::err_multiversion_doesnt_support)
-                              << static_cast<unsigned>(MVType)),
+                              << static_cast<unsigned>(MVKind)),
       PartialDiagnosticAt(NewFD->getLocation(),
                           S.PDiag(diag::err_multiversion_diff)),
       /*TemplatesSupported=*/false,
-      /*ConstexprSupported=*/!IsCPUSpecificCPUDispatchMVType,
+      /*ConstexprSupported=*/!IsCPUSpecificCPUDispatchMVKind,
       /*CLinkageMayDiffer=*/false);
 }
 
@@ -10476,22 +10591,22 @@ static bool CheckMultiVersionAdditionalRules(Sema &S, const FunctionDecl *OldFD,
 ///
 /// Returns true if there was an error, false otherwise.
 static bool CheckMultiVersionFirstFunction(Sema &S, FunctionDecl *FD,
-                                           MultiVersionKind MVType,
+                                           MultiVersionKind MVKind,
                                            const TargetAttr *TA) {
-  assert(MVType != MultiVersionKind::None &&
+  assert(MVKind != MultiVersionKind::None &&
          "Function lacks multiversion attribute");
 
   // Target only causes MV if it is default, otherwise this is a normal
   // function.
-  if (MVType == MultiVersionKind::Target && !TA->isDefaultVersion())
+  if (MVKind == MultiVersionKind::Target && !TA->isDefaultVersion())
     return false;
 
-  if (MVType == MultiVersionKind::Target && CheckMultiVersionValue(S, FD)) {
+  if (MVKind == MultiVersionKind::Target && CheckMultiVersionValue(S, FD)) {
     FD->setInvalidDecl();
     return true;
   }
 
-  if (CheckMultiVersionAdditionalRules(S, nullptr, FD, true, MVType)) {
+  if (CheckMultiVersionAdditionalRules(S, nullptr, FD, true, MVKind)) {
     FD->setInvalidDecl();
     return true;
   }
@@ -10511,8 +10626,7 @@ static bool PreviousDeclsHaveMultiVersionAttribute(const FunctionDecl *FD) {
 
 static bool CheckTargetCausesMultiVersioning(
     Sema &S, FunctionDecl *OldFD, FunctionDecl *NewFD, const TargetAttr *NewTA,
-    bool &Redeclaration, NamedDecl *&OldDecl, bool &MergeTypeWithPrevious,
-    LookupResult &Previous) {
+    bool &Redeclaration, NamedDecl *&OldDecl, LookupResult &Previous) {
   const auto *OldTA = OldFD->getAttr<TargetAttr>();
   ParsedTargetAttr NewParsed = NewTA->parse();
   // Sort order doesn't matter, it just needs to be consistent.
@@ -10525,13 +10639,6 @@ static bool CheckTargetCausesMultiVersioning(
     return false;
 
   // Otherwise, this decl causes MultiVersioning.
-  if (!S.getASTContext().getTargetInfo().supportsMultiVersioning()) {
-    S.Diag(NewFD->getLocation(), diag::err_multiversion_not_supported);
-    S.Diag(OldFD->getLocation(), diag::note_previous_declaration);
-    NewFD->setInvalidDecl();
-    return true;
-  }
-
   if (CheckMultiVersionAdditionalRules(S, OldFD, NewFD, true,
                                        MultiVersionKind::Target)) {
     NewFD->setInvalidDecl();
@@ -10584,7 +10691,6 @@ static bool CheckTargetCausesMultiVersioning(
   OldFD->setIsMultiVersion();
   NewFD->setIsMultiVersion();
   Redeclaration = false;
-  MergeTypeWithPrevious = false;
   OldDecl = nullptr;
   Previous.clear();
   return false;
@@ -10606,14 +10712,14 @@ static bool MultiVersionTypesCompatible(MultiVersionKind Old,
 /// multiversioned declaration collection.
 static bool CheckMultiVersionAdditionalDecl(
     Sema &S, FunctionDecl *OldFD, FunctionDecl *NewFD,
-    MultiVersionKind NewMVType, const TargetAttr *NewTA,
+    MultiVersionKind NewMVKind, const TargetAttr *NewTA,
     const CPUDispatchAttr *NewCPUDisp, const CPUSpecificAttr *NewCPUSpec,
     const TargetClonesAttr *NewClones, bool &Redeclaration, NamedDecl *&OldDecl,
-    bool &MergeTypeWithPrevious, LookupResult &Previous) {
+    LookupResult &Previous) {
 
-  MultiVersionKind OldMVType = OldFD->getMultiVersionKind();
+  MultiVersionKind OldMVKind = OldFD->getMultiVersionKind();
   // Disallow mixing of multiversioning types.
-  if (!MultiVersionTypesCompatible(OldMVType, NewMVType)) {
+  if (!MultiVersionTypesCompatible(OldMVKind, NewMVKind)) {
     S.Diag(NewFD->getLocation(), diag::err_multiversion_types_mixed);
     S.Diag(OldFD->getLocation(), diag::note_previous_declaration);
     NewFD->setInvalidDecl();
@@ -10629,18 +10735,22 @@ static bool CheckMultiVersionAdditionalDecl(
   bool UseMemberUsingDeclRules =
       S.CurContext->isRecord() && !NewFD->getFriendObjectKind();
 
+  bool MayNeedOverloadableChecks =
+      AllowOverloadingOfFunction(Previous, S.Context, NewFD);
+
   // Next, check ALL non-overloads to see if this is a redeclaration of a
   // previous member of the MultiVersion set.
   for (NamedDecl *ND : Previous) {
     FunctionDecl *CurFD = ND->getAsFunction();
     if (!CurFD)
       continue;
-    if (S.IsOverload(NewFD, CurFD, UseMemberUsingDeclRules))
+    if (MayNeedOverloadableChecks &&
+        S.IsOverload(NewFD, CurFD, UseMemberUsingDeclRules))
       continue;
 
-    switch (NewMVType) {
+    switch (NewMVKind) {
     case MultiVersionKind::None:
-      assert(OldMVType == MultiVersionKind::TargetClones &&
+      assert(OldMVKind == MultiVersionKind::TargetClones &&
              "Only target_clones can be omitted in subsequent declarations");
       break;
     case MultiVersionKind::Target: {
@@ -10665,7 +10775,6 @@ static bool CheckMultiVersionAdditionalDecl(
       const auto *CurClones = CurFD->getAttr<TargetClonesAttr>();
       Redeclaration = true;
       OldDecl = CurFD;
-      MergeTypeWithPrevious = true;
       NewFD->setIsMultiVersion();
 
       if (CurClones && NewClones &&
@@ -10688,7 +10797,7 @@ static bool CheckMultiVersionAdditionalDecl(
       // Handle CPUDispatch/CPUSpecific versions.
       // Only 1 CPUDispatch function is allowed, this will make it go through
       // the redeclaration errors.
-      if (NewMVType == MultiVersionKind::CPUDispatch &&
+      if (NewMVKind == MultiVersionKind::CPUDispatch &&
           CurFD->hasAttr<CPUDispatchAttr>()) {
         if (CurCPUDisp->cpus_size() == NewCPUDisp->cpus_size() &&
             std::equal(
@@ -10709,8 +10818,7 @@ static bool CheckMultiVersionAdditionalDecl(
         NewFD->setInvalidDecl();
         return true;
       }
-      if (NewMVType == MultiVersionKind::CPUSpecific && CurCPUSpec) {
-
+      if (NewMVKind == MultiVersionKind::CPUSpecific && CurCPUSpec) {
         if (CurCPUSpec->cpus_size() == NewCPUSpec->cpus_size() &&
             std::equal(
                 CurCPUSpec->cpus_begin(), CurCPUSpec->cpus_end(),
@@ -10745,14 +10853,14 @@ static bool CheckMultiVersionAdditionalDecl(
   // Else, this is simply a non-redecl case.  Checking the 'value' is only
   // necessary in the Target case, since The CPUSpecific/Dispatch cases are
   // handled in the attribute adding step.
-  if (NewMVType == MultiVersionKind::Target &&
+  if (NewMVKind == MultiVersionKind::Target &&
       CheckMultiVersionValue(S, NewFD)) {
     NewFD->setInvalidDecl();
     return true;
   }
 
   if (CheckMultiVersionAdditionalRules(S, OldFD, NewFD,
-                                       !OldFD->isMultiVersion(), NewMVType)) {
+                                       !OldFD->isMultiVersion(), NewMVKind)) {
     NewFD->setInvalidDecl();
     return true;
   }
@@ -10768,7 +10876,6 @@ static bool CheckMultiVersionAdditionalDecl(
 
   NewFD->setIsMultiVersion();
   Redeclaration = false;
-  MergeTypeWithPrevious = false;
   OldDecl = nullptr;
   Previous.clear();
   return false;
@@ -10782,19 +10889,18 @@ static bool CheckMultiVersionAdditionalDecl(
 /// Returns true if there was an error, false otherwise.
 static bool CheckMultiVersionFunction(Sema &S, FunctionDecl *NewFD,
                                       bool &Redeclaration, NamedDecl *&OldDecl,
-                                      bool &MergeTypeWithPrevious,
                                       LookupResult &Previous) {
   const auto *NewTA = NewFD->getAttr<TargetAttr>();
   const auto *NewCPUDisp = NewFD->getAttr<CPUDispatchAttr>();
   const auto *NewCPUSpec = NewFD->getAttr<CPUSpecificAttr>();
   const auto *NewClones = NewFD->getAttr<TargetClonesAttr>();
-  MultiVersionKind MVType = NewFD->getMultiVersionKind();
+  MultiVersionKind MVKind = NewFD->getMultiVersionKind();
 
   // Main isn't allowed to become a multiversion function, however it IS
   // permitted to have 'main' be marked with the 'target' optimization hint.
   if (NewFD->isMain()) {
-    if (MVType != MultiVersionKind::None &&
-        !(MVType == MultiVersionKind::Target && !NewTA->isDefaultVersion())) {
+    if (MVKind != MultiVersionKind::None &&
+        !(MVKind == MultiVersionKind::Target && !NewTA->isDefaultVersion())) {
       S.Diag(NewFD->getLocation(), diag::err_multiversion_not_allowed_on_main);
       NewFD->setInvalidDecl();
       return true;
@@ -10807,19 +10913,19 @@ static bool CheckMultiVersionFunction(Sema &S, FunctionDecl *NewFD,
           NewFD->getDeclContext()->getRedeclContext()) {
     // If there's no previous declaration, AND this isn't attempting to cause
     // multiversioning, this isn't an error condition.
-    if (MVType == MultiVersionKind::None)
+    if (MVKind == MultiVersionKind::None)
       return false;
-    return CheckMultiVersionFirstFunction(S, NewFD, MVType, NewTA);
+    return CheckMultiVersionFirstFunction(S, NewFD, MVKind, NewTA);
   }
 
   FunctionDecl *OldFD = OldDecl->getAsFunction();
 
-  if (!OldFD->isMultiVersion() && MVType == MultiVersionKind::None)
+  if (!OldFD->isMultiVersion() && MVKind == MultiVersionKind::None)
     return false;
 
   // Multiversioned redeclarations aren't allowed to omit the attribute, except
   // for target_clones.
-  if (OldFD->isMultiVersion() && MVType == MultiVersionKind::None &&
+  if (OldFD->isMultiVersion() && MVKind == MultiVersionKind::None &&
       OldFD->getMultiVersionKind() != MultiVersionKind::TargetClones) {
     S.Diag(NewFD->getLocation(), diag::err_multiversion_required_in_redecl)
         << (OldFD->getMultiVersionKind() != MultiVersionKind::Target);
@@ -10828,11 +10934,10 @@ static bool CheckMultiVersionFunction(Sema &S, FunctionDecl *NewFD,
   }
 
   if (!OldFD->isMultiVersion()) {
-    switch (MVType) {
+    switch (MVKind) {
     case MultiVersionKind::Target:
       return CheckTargetCausesMultiVersioning(S, OldFD, NewFD, NewTA,
-                                              Redeclaration, OldDecl,
-                                              MergeTypeWithPrevious, Previous);
+                                              Redeclaration, OldDecl, Previous);
     case MultiVersionKind::TargetClones:
       if (OldFD->isUsed(false)) {
         NewFD->setInvalidDecl();
@@ -10846,18 +10951,13 @@ static bool CheckMultiVersionFunction(Sema &S, FunctionDecl *NewFD,
       break;
     }
   }
-  // Handle the target potentially causes multiversioning case.
-  if (!OldFD->isMultiVersion() && MVType == MultiVersionKind::Target)
-    return CheckTargetCausesMultiVersioning(S, OldFD, NewFD, NewTA,
-                                            Redeclaration, OldDecl,
-                                            MergeTypeWithPrevious, Previous);
 
   // At this point, we have a multiversion function decl (in OldFD) AND an
   // appropriate attribute in the current function decl.  Resolve that these are
   // still compatible with previous declarations.
-  return CheckMultiVersionAdditionalDecl(
-      S, OldFD, NewFD, MVType, NewTA, NewCPUDisp, NewCPUSpec, NewClones,
-      Redeclaration, OldDecl, MergeTypeWithPrevious, Previous);
+  return CheckMultiVersionAdditionalDecl(S, OldFD, NewFD, MVKind, NewTA,
+                                         NewCPUDisp, NewCPUSpec, NewClones,
+                                         Redeclaration, OldDecl, Previous);
 }
 
 /// Perform semantic checking of a new function declaration.
@@ -10947,8 +11047,7 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
     }
   }
 
-  if (CheckMultiVersionFunction(*this, NewFD, Redeclaration, OldDecl,
-                                MergeTypeWithPrevious, Previous))
+  if (CheckMultiVersionFunction(*this, NewFD, Redeclaration, OldDecl, Previous))
     return Redeclaration;
 
   // PPC MMA non-pointer types are not allowed as function return types.
@@ -11242,6 +11341,11 @@ void Sema::CheckMain(FunctionDecl* FD, const DeclSpec& DS) {
     FD->setInvalidDecl();
     return;
   }
+
+  // Functions named main in hlsl are default entries, but don't have specific
+  // signatures they are required to conform to.
+  if (getLangOpts().HLSL)
+    return;
 
   QualType T = FD->getType();
   assert(T->isFunctionType() && "function decl is not of function type");
@@ -13067,11 +13171,9 @@ void Sema::ActOnCXXForRangeDecl(Decl *D) {
   }
 }
 
-StmtResult
-Sema::ActOnCXXForRangeIdentifier(Scope *S, SourceLocation IdentLoc,
-                                 IdentifierInfo *Ident,
-                                 ParsedAttributes &Attrs,
-                                 SourceLocation AttrEnd) {
+StmtResult Sema::ActOnCXXForRangeIdentifier(Scope *S, SourceLocation IdentLoc,
+                                            IdentifierInfo *Ident,
+                                            ParsedAttributes &Attrs) {
   // C++1y [stmt.iter]p1:
   //   A range-based for statement of the form
   //      for ( for-range-identifier : for-range-initializer ) statement
@@ -13086,7 +13188,7 @@ Sema::ActOnCXXForRangeIdentifier(Scope *S, SourceLocation IdentLoc,
 
   Declarator D(DS, DeclaratorContext::ForInit);
   D.SetIdentifier(Ident, IdentLoc);
-  D.takeAttributes(Attrs, AttrEnd);
+  D.takeAttributes(Attrs);
 
   D.AddTypeInfo(DeclaratorChunk::getReference(0, IdentLoc, /*lvalue*/ false),
                 IdentLoc);
@@ -13094,7 +13196,8 @@ Sema::ActOnCXXForRangeIdentifier(Scope *S, SourceLocation IdentLoc,
   cast<VarDecl>(Var)->setCXXForRangeDecl(true);
   FinalizeDeclaration(Var);
   return ActOnDeclStmt(FinalizeDeclaratorGroup(S, DS, Var), IdentLoc,
-                       AttrEnd.isValid() ? AttrEnd : IdentLoc);
+                       Attrs.Range.getEnd().isValid() ? Attrs.Range.getEnd()
+                                                      : IdentLoc);
 }
 
 void Sema::CheckCompleteVariableDeclaration(VarDecl *var) {
@@ -14154,6 +14257,11 @@ ShouldWarnAboutMissingPrototype(const FunctionDecl *FD,
   if (FD->isDeleted())
     return false;
 
+  // Don't warn on implicitly local functions (such as having local-typed
+  // parameters).
+  if (!FD->isExternallyVisible())
+    return false;
+
   for (const FunctionDecl *Prev = FD->getPreviousDecl();
        Prev; Prev = Prev->getPreviousDecl()) {
     // Ignore any declarations that occur in function or method
@@ -14585,18 +14693,20 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
       if (getLangOpts().CPlusPlus14) {
         if (!FD->isInvalidDecl() && Body && !FD->isDependentContext() &&
             FD->getReturnType()->isUndeducedType()) {
-          // If the function has a deduced result type but contains no 'return'
-          // statements, the result type as written must be exactly 'auto', and
-          // the deduced result type is 'void'.
+          // For a function with a deduced result type to return void,
+          // the result type as written must be 'auto' or 'decltype(auto)',
+          // possibly cv-qualified or constrained, but not ref-qualified.
           if (!FD->getReturnType()->getAs<AutoType>()) {
             Diag(dcl->getLocation(), diag::err_auto_fn_no_return_but_not_auto)
                 << FD->getReturnType();
             FD->setInvalidDecl();
           } else {
-            // Substitute 'void' for the 'auto' in the type.
-            TypeLoc ResultType = getReturnTypeLoc(FD);
-            Context.adjustDeducedFunctionResultType(
-                FD, SubstAutoType(ResultType.getType(), Context.VoidTy));
+            // Falling off the end of the function is the same as 'return;'.
+            Expr *Dummy = nullptr;
+            if (DeduceFunctionTypeFromReturnExpr(
+                    FD, dcl->getLocation(), Dummy,
+                    FD->getReturnType()->getAs<AutoType>()))
+              FD->setInvalidDecl();
           }
         }
       } else if (getLangOpts().CPlusPlus11 && isLambdaCallOperator(FD)) {
@@ -14630,8 +14740,10 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
         Diag(FD->getLocation(), diag::ext_pure_function_definition);
 
       if (!FD->isInvalidDecl()) {
-        // Don't diagnose unused parameters of defaulted or deleted functions.
-        if (!FD->isDeleted() && !FD->isDefaulted() && !FD->hasSkippedBody())
+        // Don't diagnose unused parameters of defaulted, deleted or naked
+        // functions.
+        if (!FD->isDeleted() && !FD->isDefaulted() && !FD->hasSkippedBody() &&
+            !FD->hasAttr<NakedAttr>())
           DiagnoseUnusedParameters(FD->parameters());
         DiagnoseSizeOfParametersAndReturnValue(FD->parameters(),
                                                FD->getReturnType(), FD);
@@ -15238,28 +15350,32 @@ void Sema::AddKnownFunctionAttributes(FunctionDecl *FD) {
 
     // Add known guaranteed alignment for allocation functions.
     switch (BuiltinID) {
+    case Builtin::BImemalign:
     case Builtin::BIaligned_alloc:
       if (!FD->hasAttr<AllocAlignAttr>())
         FD->addAttr(AllocAlignAttr::CreateImplicit(Context, ParamIdx(1, FD),
                                                    FD->getLocation()));
-      LLVM_FALLTHROUGH;
-    case Builtin::BIcalloc:
-    case Builtin::BImalloc:
-    case Builtin::BImemalign:
-    case Builtin::BIrealloc:
-    case Builtin::BIstrdup:
-    case Builtin::BIstrndup: {
-      if (!FD->hasAttr<AssumeAlignedAttr>()) {
-        unsigned NewAlign = Context.getTargetInfo().getNewAlign() /
-                            Context.getTargetInfo().getCharWidth();
-        IntegerLiteral *Alignment = IntegerLiteral::Create(
-            Context, Context.MakeIntValue(NewAlign, Context.UnsignedIntTy),
-            Context.UnsignedIntTy, FD->getLocation());
-        FD->addAttr(AssumeAlignedAttr::CreateImplicit(
-            Context, Alignment, /*Offset=*/nullptr, FD->getLocation()));
-      }
+      break;
+    default:
       break;
     }
+
+    // Add allocsize attribute for allocation functions.
+    switch (BuiltinID) {
+    case Builtin::BIcalloc:
+      FD->addAttr(AllocSizeAttr::CreateImplicit(
+          Context, ParamIdx(1, FD), ParamIdx(2, FD), FD->getLocation()));
+      break;
+    case Builtin::BImemalign:
+    case Builtin::BIaligned_alloc:
+    case Builtin::BIrealloc:
+      FD->addAttr(AllocSizeAttr::CreateImplicit(Context, ParamIdx(2, FD),
+                                                ParamIdx(), FD->getLocation()));
+      break;
+    case Builtin::BImalloc:
+      FD->addAttr(AllocSizeAttr::CreateImplicit(Context, ParamIdx(1, FD),
+                                                ParamIdx(), FD->getLocation()));
+      break;
     default:
       break;
     }
@@ -15959,9 +16075,20 @@ Decl *Sema::ActOnTag(Scope *S, unsigned TagSpec, TagUseKind TUK,
       // with C structs, unions, and enums when looking for a matching
       // tag declaration or definition. See the similar lookup tweak
       // in Sema::LookupName; is there a better way to deal with this?
-      while (isa<RecordDecl>(SearchDC) || isa<EnumDecl>(SearchDC))
+      while (isa<RecordDecl, EnumDecl, ObjCContainerDecl>(SearchDC))
+        SearchDC = SearchDC->getParent();
+    } else if (getLangOpts().CPlusPlus) {
+      // Inside ObjCContainer want to keep it as a lexical decl context but go
+      // past it (most often to TranslationUnit) to find the semantic decl
+      // context.
+      while (isa<ObjCContainerDecl>(SearchDC))
         SearchDC = SearchDC->getParent();
     }
+  } else if (getLangOpts().CPlusPlus) {
+    // Don't use ObjCContainerDecl as the semantic decl context for anonymous
+    // TagDecl the same way as we skip it for named TagDecl.
+    while (isa<ObjCContainerDecl>(SearchDC))
+      SearchDC = SearchDC->getParent();
   }
 
   if (Previous.isSingleResult() &&
@@ -16535,7 +16662,7 @@ CreateNewDecl:
     SetMemberAccessSpecifier(New, PrevDecl, AS);
 
   if (PrevDecl)
-    CheckRedeclarationModuleOwnership(New, PrevDecl);
+    CheckRedeclarationInModule(New, PrevDecl);
 
   if (TUK == TUK_Definition && (!SkipBody || !SkipBody->ShouldSkip))
     New->startDefinition();
@@ -16611,8 +16738,7 @@ void Sema::ActOnTagStartDefinition(Scope *S, Decl *TagD) {
   AddPushedVisibilityAttribute(Tag);
 }
 
-bool Sema::ActOnDuplicateDefinition(DeclSpec &DS, Decl *Prev,
-                                    SkipBodyInfo &SkipBody) {
+bool Sema::ActOnDuplicateDefinition(Decl *Prev, SkipBodyInfo &SkipBody) {
   if (!hasStructuralCompatLayout(Prev, SkipBody.New))
     return false;
 
@@ -16685,8 +16811,21 @@ void Sema::ActOnTagFinishDefinition(Scope *S, Decl *TagD,
       RD->completeDefinition();
   }
 
-  if (isa<CXXRecordDecl>(Tag)) {
+  if (auto *RD = dyn_cast<CXXRecordDecl>(Tag)) {
     FieldCollector->FinishClass();
+    if (RD->hasAttr<SYCLSpecialClassAttr>()) {
+      auto *Def = RD->getDefinition();
+      assert(Def && "The record is expected to have a completed definition");
+      unsigned NumInitMethods = 0;
+      for (auto *Method : Def->methods()) {
+        if (!Method->getIdentifier())
+            continue;
+        if (Method->getName() == "__init")
+          NumInitMethods++;
+      }
+      if (NumInitMethods > 1 || !Def->hasInitMethod())
+        Diag(RD->getLocation(), diag::err_sycl_special_type_num_init_method);
+    }
   }
 
   // Exit this scope of this tag's definition.
@@ -18366,9 +18505,6 @@ void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceRange BraceRange,
   unsigned NumNegativeBits = 0;
   unsigned NumPositiveBits = 0;
 
-  // Keep track of whether all elements have type int.
-  bool AllElementsInt = true;
-
   for (unsigned i = 0, e = Elements.size(); i != e; ++i) {
     EnumConstantDecl *ECD =
       cast_or_null<EnumConstantDecl>(Elements[i]);
@@ -18383,10 +18519,6 @@ void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceRange BraceRange,
     else
       NumNegativeBits = std::max(NumNegativeBits,
                                  (unsigned)InitVal.getMinSignedBits());
-
-    // Keep track of whether every enum element has type int (very common).
-    if (AllElementsInt)
-      AllElementsInt = ECD->getType() == Context.IntTy;
   }
 
   // Figure out the type that should be used for this enum.
@@ -18614,9 +18746,7 @@ void Sema::ActOnPragmaWeakID(IdentifierInfo* Name,
   if (PrevDecl) {
     PrevDecl->addAttr(WeakAttr::CreateImplicit(Context, PragmaLoc, AttributeCommonInfo::AS_Pragma));
   } else {
-    (void)WeakUndeclaredIdentifiers.insert(
-      std::pair<IdentifierInfo*,WeakInfo>
-        (Name, WeakInfo((IdentifierInfo*)nullptr, NameLoc)));
+    (void)WeakUndeclaredIdentifiers[Name].insert(WeakInfo(nullptr, NameLoc));
   }
 }
 
@@ -18634,8 +18764,7 @@ void Sema::ActOnPragmaWeakAlias(IdentifierInfo* Name,
       if (NamedDecl *ND = dyn_cast<NamedDecl>(PrevDecl))
         DeclApplyPragmaWeak(TUScope, ND, W);
   } else {
-    (void)WeakUndeclaredIdentifiers.insert(
-      std::pair<IdentifierInfo*,WeakInfo>(AliasName, W));
+    (void)WeakUndeclaredIdentifiers[AliasName].insert(W);
   }
 }
 

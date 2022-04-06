@@ -73,6 +73,8 @@ if (git_executable)
   endif()
 endif()
 
+find_program(GNU_LD_EXECUTABLE NAMES ${LLVM_DEFAULT_TARGET_TRIPLE}-ld.bfd ld.bfd DOC "GNU ld")
+
 # If we can't find a revision, set it to "<unknown>".
 if (NOT BOLT_REVISION)
   set(BOLT_REVISION "<unknown>")
@@ -91,6 +93,10 @@ add_subdirectory(lib)
 add_subdirectory(tools)
 
 if (BOLT_INCLUDE_TESTS)
+  if (EXISTS ${LLVM_MAIN_SRC_DIR}/utils/unittest/googletest/include/gtest/gtest.h)
+    add_subdirectory(unittests)
+    list(APPEND BOLT_TEST_DEPS BoltUnitTests)
+  endif()
   add_subdirectory(test)
 endif()
 
