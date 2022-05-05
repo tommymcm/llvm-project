@@ -890,6 +890,18 @@ TEST_P(ImportDecl, ImportUsingDecl) {
              functionDecl(hasDescendant(usingDecl(hasName("bar")))));
 }
 
+TEST_P(ImportDecl, ImportUsingTemplate) {
+  MatchVerifier<Decl> Verifier;
+  testImport("namespace ns { template <typename T> struct S {}; }"
+             "template <template <typename> class T> class X {};"
+             "void declToImport() {"
+             "using ns::S;  X<S> xi; }",
+             Lang_CXX11, "", Lang_CXX11, Verifier,
+             functionDecl(
+                 hasDescendant(varDecl(hasTypeLoc(templateSpecializationTypeLoc(
+                     hasAnyTemplateArgumentLoc(templateArgumentLoc())))))));
+}
+
 TEST_P(ImportDecl, ImportUsingEnumDecl) {
   MatchVerifier<Decl> Verifier;
   testImport("namespace foo { enum bar { baz, toto, quux }; }"
@@ -2646,7 +2658,10 @@ TEST_P(ImportFriendFunctions, Lookup) {
       getTuDecl("struct X { friend void f(); };", Lang_CXX03, "input0.cc");
   auto *FromD = FirstDeclMatcher<FunctionDecl>().match(FromTU, FunctionPattern);
   ASSERT_TRUE(FromD->isInIdentifierNamespace(Decl::IDNS_OrdinaryFriend));
-  ASSERT_FALSE(FromD->isInIdentifierNamespace(Decl::IDNS_Ordinary));
+  // Before CXX20, MSVC treats friend function declarations as function
+  // declarations
+  ASSERT_EQ(FromTU->getLangOpts().MSVCCompat,
+            FromD->isInIdentifierNamespace(Decl::IDNS_Ordinary));
   {
     auto FromName = FromD->getDeclName();
     auto *Class = FirstDeclMatcher<CXXRecordDecl>().match(FromTU, ClassPattern);
@@ -2690,7 +2705,10 @@ TEST_P(ImportFriendFunctions, LookupWithProtoAfter) {
   auto *FromNormal =
       LastDeclMatcher<FunctionDecl>().match(FromTU, FunctionPattern);
   ASSERT_TRUE(FromFriend->isInIdentifierNamespace(Decl::IDNS_OrdinaryFriend));
-  ASSERT_FALSE(FromFriend->isInIdentifierNamespace(Decl::IDNS_Ordinary));
+  // Before CXX20, MSVC treats friend function declarations as function
+  // declarations
+  ASSERT_EQ(FromTU->getLangOpts().MSVCCompat,
+            FromFriend->isInIdentifierNamespace(Decl::IDNS_Ordinary));
   ASSERT_FALSE(FromNormal->isInIdentifierNamespace(Decl::IDNS_OrdinaryFriend));
   ASSERT_TRUE(FromNormal->isInIdentifierNamespace(Decl::IDNS_Ordinary));
 
@@ -2781,7 +2799,10 @@ TEST_P(ImportFriendFunctions, ImportFriendChangesLookup) {
 
   ASSERT_TRUE(FromNormalF->isInIdentifierNamespace(Decl::IDNS_Ordinary));
   ASSERT_FALSE(FromNormalF->isInIdentifierNamespace(Decl::IDNS_OrdinaryFriend));
-  ASSERT_FALSE(FromFriendF->isInIdentifierNamespace(Decl::IDNS_Ordinary));
+  // Before CXX20, MSVC treats friend function declarations as function
+  // declarations
+  ASSERT_EQ(FromFriendTU->getLangOpts().MSVCCompat,
+            FromFriendF->isInIdentifierNamespace(Decl::IDNS_Ordinary));
   ASSERT_TRUE(FromFriendF->isInIdentifierNamespace(Decl::IDNS_OrdinaryFriend));
   auto LookupRes = FromNormalTU->noload_lookup(FromNormalName);
   ASSERT_TRUE(LookupRes.isSingleResult());
@@ -5821,6 +5842,53 @@ TEST_P(ErrorHandlingTest, ODRViolationWithinParmVarDecls) {
   EXPECT_FALSE(ImportedF);
 }
 
+TEST_P(ErrorHandlingTest, DoNotInheritErrorFromNonDependentChild) {
+  // Declarations should not inherit an import error from a child object
+  // if the declaration has no direct dependence to such a child.
+  // For example a namespace should not get import error if one of the
+  // declarations inside it fails to import.
+  // There was a special case in error handling (when "import path circles" are
+  // encountered) when this property was not held. This case is provoked by the
+  // following code.
+  constexpr auto ToTUCode = R"(
+      namespace ns {
+        struct Err {
+          char A;
+        };
+      }
+      )";
+  constexpr auto FromTUCode = R"(
+      namespace ns {
+        struct A {
+          using U = struct Err;
+        };
+      }
+      namespace ns {
+        struct Err {}; // ODR violation
+        void f(A) {}
+      }
+      )";
+
+  Decl *ToTU = getToTuDecl(ToTUCode, Lang_CXX11);
+  static_cast<void>(ToTU);
+  Decl *FromTU = getTuDecl(FromTUCode, Lang_CXX11);
+  auto *FromA = FirstDeclMatcher<CXXRecordDecl>().match(
+      FromTU, cxxRecordDecl(hasName("A"), hasDefinition()));
+  ASSERT_TRUE(FromA);
+  auto *ImportedA = Import(FromA, Lang_CXX11);
+  // 'A' can not be imported: ODR error at 'Err'
+  EXPECT_FALSE(ImportedA);
+  // When import of 'A' failed there was a "saved import path circle" that
+  // contained namespace 'ns' (A - U - Err - ns - f - A). This should not mean
+  // that every object in this path fails to import.
+
+  Decl *FromNS = FirstDeclMatcher<NamespaceDecl>().match(
+      FromTU, namespaceDecl(hasName("ns")));
+  EXPECT_TRUE(FromNS);
+  auto *ImportedNS = Import(FromNS, Lang_CXX11);
+  EXPECT_TRUE(ImportedNS);
+}
+
 TEST_P(ASTImporterOptionSpecificTestBase, LambdaInFunctionBody) {
   Decl *FromTU = getTuDecl(
       R"(
@@ -6632,6 +6700,15 @@ TEST_P(ASTImporterOptionSpecificTestBase, ImportFormatAttr) {
   EXPECT_EQ(FromAttr->getAttributeSpellingListIndex(),
             ToAttr->getAttributeSpellingListIndex());
   EXPECT_EQ(FromAttr->getType()->getName(), ToAttr->getType()->getName());
+}
+
+TEST_P(ImportAttributes, ImportEnableIf) {
+  EnableIfAttr *FromAttr, *ToAttr;
+  importAttr<FunctionDecl>(
+      "void test(int A) __attribute__((enable_if(A == 1, \"message\")));",
+      FromAttr, ToAttr);
+  checkImported(FromAttr->getCond(), ToAttr->getCond());
+  EXPECT_EQ(FromAttr->getMessage(), ToAttr->getMessage());
 }
 
 TEST_P(ImportAttributes, ImportGuardedVar) {

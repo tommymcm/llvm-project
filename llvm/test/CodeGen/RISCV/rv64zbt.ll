@@ -404,8 +404,7 @@ define i64 @cmov_sgt_i64_constant_2046(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_sgt_i64_constant_2046:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    slti a1, a1, 2047
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp sgt i64 %b, 2046
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -426,8 +425,7 @@ define i64 @cmov_sgt_i64_constant_neg_2049(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_sgt_i64_constant_neg_2049:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    slti a1, a1, -2048
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp sgt i64 %b, -2049
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -466,8 +464,7 @@ define i64 @cmov_sge_i64_constant_2047(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_sge_i64_constant_2047:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    slti a1, a1, 2047
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp sge i64 %b, 2047
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -488,8 +485,7 @@ define i64 @cmov_sge_i64_constant_neg_2048(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_sge_i64_constant_neg_2048:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    slti a1, a1, -2048
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp sge i64 %b, -2048
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -587,8 +583,7 @@ define i64 @cmov_ugt_i64_constant_2046(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_ugt_i64_constant_2046:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    sltiu a1, a1, 2047
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp ugt i64 %b, 2046
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -609,8 +604,7 @@ define i64 @cmov_ugt_i64_constant_neg_2049(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_ugt_i64_constant_neg_2049:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    sltiu a1, a1, -2048
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp ugt i64 %b, 18446744073709549567
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -649,8 +643,7 @@ define i64 @cmov_uge_i64_constant_2047(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_uge_i64_constant_2047:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    sltiu a1, a1, 2047
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp uge i64 %b, 2047
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -671,8 +664,7 @@ define i64 @cmov_uge_i64_constant_neg_2048(i64 %a, i64 %b, i64 %c) nounwind {
 ; RV64ZBT-LABEL: cmov_uge_i64_constant_neg_2048:
 ; RV64ZBT:       # %bb.0:
 ; RV64ZBT-NEXT:    sltiu a1, a1, -2048
-; RV64ZBT-NEXT:    xori a1, a1, 1
-; RV64ZBT-NEXT:    cmov a0, a1, a0, a2
+; RV64ZBT-NEXT:    cmov a0, a1, a2, a0
 ; RV64ZBT-NEXT:    ret
   %tobool = icmp uge i64 %b, 18446744073709549568
   %cond = select i1 %tobool, i64 %a, i64 %c
@@ -820,9 +812,8 @@ define signext i32 @fshri_i32(i32 signext %a, i32 signext %b) nounwind {
 ; RV64I-LABEL: fshri_i32:
 ; RV64I:       # %bb.0:
 ; RV64I-NEXT:    srliw a1, a1, 5
-; RV64I-NEXT:    slli a0, a0, 27
+; RV64I-NEXT:    slliw a0, a0, 27
 ; RV64I-NEXT:    or a0, a0, a1
-; RV64I-NEXT:    sext.w a0, a0
 ; RV64I-NEXT:    ret
 ;
 ; RV64ZBT-LABEL: fshri_i32:
@@ -873,9 +864,8 @@ define signext i32 @fshli_i32(i32 signext %a, i32 signext %b) nounwind {
 ; RV64I-LABEL: fshli_i32:
 ; RV64I:       # %bb.0:
 ; RV64I-NEXT:    srliw a1, a1, 27
-; RV64I-NEXT:    slli a0, a0, 5
+; RV64I-NEXT:    slliw a0, a0, 5
 ; RV64I-NEXT:    or a0, a0, a1
-; RV64I-NEXT:    sext.w a0, a0
 ; RV64I-NEXT:    ret
 ;
 ; RV64ZBT-LABEL: fshli_i32:

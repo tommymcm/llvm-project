@@ -898,7 +898,7 @@ the configuration (without a prefix: ``Auto``).
                     int d,
                     int e);
 
-**AllowShortBlocksOnASingleLine** (``ShortBlockStyle``) :versionbadge:`clang-format 11`
+**AllowShortBlocksOnASingleLine** (``ShortBlockStyle``) :versionbadge:`clang-format 3.5`
   Dependent on the value, ``while (true) { continue; }`` can be put on a
   single line.
 
@@ -1023,7 +1023,7 @@ the configuration (without a prefix: ``Auto``).
 
 
 
-**AllowShortIfStatementsOnASingleLine** (``ShortIfStyle``) :versionbadge:`clang-format 9`
+**AllowShortIfStatementsOnASingleLine** (``ShortIfStyle``) :versionbadge:`clang-format 3.3`
   Dependent on the value, ``if (a) return;`` can be put on a single line.
 
   Possible values:
@@ -1662,6 +1662,7 @@ the configuration (without a prefix: ``Auto``).
 
     .. code-block:: c++
 
+      false:          true:
       int f()   vs.   int f()
       {}              {
                       }
@@ -1673,6 +1674,7 @@ the configuration (without a prefix: ``Auto``).
 
     .. code-block:: c++
 
+      false:           true:
       class Foo   vs.  class Foo
       {}               {
                        }
@@ -1684,6 +1686,7 @@ the configuration (without a prefix: ``Auto``).
 
     .. code-block:: c++
 
+      false:               true:
       namespace Foo   vs.  namespace Foo
       {}                   {
                            }
@@ -2422,7 +2425,7 @@ the configuration (without a prefix: ``Auto``).
      f(MyMap[{composite, key}]);            f(MyMap[{ composite, key }]);
      new int[3]{1, 2, 3};                   new int[3]{ 1, 2, 3 };
 
-**DeriveLineEnding** (``Boolean``) :versionbadge:`clang-format 11`
+**DeriveLineEnding** (``Boolean``) :versionbadge:`clang-format 10`
   Analyze the formatted file for the most used line ending (``\r\n``
   or ``\n``). ``UseCRLF`` is only used as a fallback if none can be derived.
 
@@ -4299,7 +4302,7 @@ the configuration (without a prefix: ``Auto``).
      true:                                  false:
      for (auto v : values) {}       vs.     for(auto v: values) {}
 
-**SpaceBeforeSquareBrackets** (``Boolean``) :versionbadge:`clang-format 11`
+**SpaceBeforeSquareBrackets** (``Boolean``) :versionbadge:`clang-format 10`
   If ``true``, spaces will be before  ``[``.
   Lambdas will not be affected. Only the first ``[`` will get a space added.
 
@@ -4309,7 +4312,7 @@ the configuration (without a prefix: ``Auto``).
      int a [5];                    vs.      int a[5];
      int a [5][5];                 vs.      int a[5][5];
 
-**SpaceInEmptyBlock** (``Boolean``) :versionbadge:`clang-format 11`
+**SpaceInEmptyBlock** (``Boolean``) :versionbadge:`clang-format 10`
   If ``true``, spaces will be inserted into ``{}``.
 
   .. code-block:: c++
@@ -4383,7 +4386,7 @@ the configuration (without a prefix: ``Auto``).
      true:                                  false:
      x = ( int32 )y                 vs.     x = (int32)y
 
-**SpacesInConditionalStatement** (``Boolean``) :versionbadge:`clang-format 11`
+**SpacesInConditionalStatement** (``Boolean``) :versionbadge:`clang-format 10`
   If ``true``, spaces will be inserted around if/for/switch/while
   conditions.
 
@@ -4547,7 +4550,7 @@ the configuration (without a prefix: ``Auto``).
 
   For example: OpenSSL STACK_OF, BSD LIST_ENTRY.
 
-**UseCRLF** (``Boolean``) :versionbadge:`clang-format 11`
+**UseCRLF** (``Boolean``) :versionbadge:`clang-format 10`
   Use ``\r\n`` instead of ``\n`` for line breaks.
   Also used as fallback if ``DeriveLineEnding`` is true.
 

@@ -275,7 +275,7 @@ ParseResult AllocaScopeOp::parse(OpAsmParser &parser, OperationState &result) {
     return failure();
 
   // Parse the body region.
-  if (parser.parseRegion(*bodyRegion, /*arguments=*/{}, /*argTypes=*/{}))
+  if (parser.parseRegion(*bodyRegion, /*arguments=*/{}))
     return failure();
   AllocaScopeOp::ensureTerminator(*bodyRegion, parser.getBuilder(),
                                   result.location);
@@ -1215,7 +1215,7 @@ ParseResult GenericAtomicRMWOp::parse(OpAsmParser &parser,
     return failure();
 
   Region *body = result.addRegion();
-  if (parser.parseRegion(*body, llvm::None, llvm::None) ||
+  if (parser.parseRegion(*body, {}) ||
       parser.parseOptionalAttrDict(result.attributes))
     return failure();
   result.types.push_back(memrefType.cast<MemRefType>().getElementType());
@@ -1812,41 +1812,83 @@ void ExpandShapeOp::getCanonicalizationPatterns(RewritePatternSet &results,
 ///
 /// Note: All collapsed dims in a reassociation group must be contiguous. It is
 /// not possible to check this by inspecting a MemRefType in the general case.
-/// But it is assumed. If this is not the case, the behavior is undefined.
+/// If non-contiguity cannot be checked statically, the collapse is assumed to
+/// be valid (and thus accepted by this function) unless `strict = true`.
 static FailureOr<AffineMap>
 computeCollapsedLayoutMap(MemRefType srcType,
-                          ArrayRef<ReassociationIndices> reassociation) {
+                          ArrayRef<ReassociationIndices> reassociation,
+                          bool strict = false) {
   int64_t srcOffset;
   SmallVector<int64_t> srcStrides;
   auto srcShape = srcType.getShape();
   if (failed(getStridesAndOffset(srcType, srcStrides, srcOffset)))
     return failure();
 
-  // The result strides are exactly the strides of the last entry of each
-  // reassociation.
+  // The result stride of a reassociation group is the stride of the last entry
+  // of the reassociation. (TODO: Should be the minimum stride in the
+  // reassociation because strides are not necessarily sorted. E.g., when using
+  // memref.transpose.) Dimensions of size 1 should be skipped, because their
+  // strides are meaningless and could have any arbitrary value.
   SmallVector<int64_t> resultStrides;
   resultStrides.reserve(reassociation.size());
-  for (ReassociationIndices reassoc : reassociation)
-    resultStrides.push_back(srcStrides[reassoc.back()]);
+  for (const ReassociationIndices &reassoc : reassociation) {
+    ArrayRef<int64_t> ref = llvm::makeArrayRef(reassoc);
+    while (srcShape[ref.back()] == 1 && ref.size() > 1)
+      ref = ref.drop_back();
+    if (!ShapedType::isDynamic(srcShape[ref.back()]) || ref.size() == 1) {
+      resultStrides.push_back(srcStrides[ref.back()]);
+    } else {
+      // Dynamically-sized dims may turn out to be dims of size 1 at runtime, so
+      // the corresponding stride may have to be skipped. (See above comment.)
+      // Therefore, the result stride cannot be statically determined and must
+      // be dynamic.
+      resultStrides.push_back(ShapedType::kDynamicStrideOrOffset);
+    }
+  }
 
   // Validate that each reassociation group is contiguous.
   unsigned resultStrideIndex = resultStrides.size() - 1;
-  for (ReassociationIndices reassoc : llvm::reverse(reassociation)) {
+  for (const ReassociationIndices &reassoc : llvm::reverse(reassociation)) {
     auto trailingReassocs = ArrayRef<int64_t>(reassoc).drop_front();
     using saturated_arith::Wrapper;
     auto stride = Wrapper::stride(resultStrides[resultStrideIndex--]);
     for (int64_t idx : llvm::reverse(trailingReassocs)) {
       stride = stride * Wrapper::size(srcShape[idx]);
-      // Both are either static strides of the same value, or both are dynamic.
-      // The dynamic case is best effort atm : we can't check it statically.
-      // One exception to the dynamic check is when the srcShape is `1`, in
-      // which case it can never produce a non-contiguity.
-      if (stride != Wrapper::stride(srcStrides[idx - 1]) && srcShape[idx] != 1)
+
+      // Both source and result stride must have the same static value. In that
+      // case, we can be sure, that the dimensions are collapsible (because they
+      // are contiguous).
+      //
+      // One special case is when the srcShape is `1`, in which case it can
+      // never produce non-contiguity.
+      if (srcShape[idx] == 1)
+        continue;
+
+      // If `strict = false` (default during op verification), we accept cases
+      // where one or both strides are dynamic. This is best effort: We reject
+      // ops where obviously non-contiguous dims are collapsed, but accept ops
+      // where we cannot be sure statically. Such ops may fail at runtime. See
+      // the op documentation for details.
+      auto srcStride = Wrapper::stride(srcStrides[idx - 1]);
+      if (strict && (stride.saturated || srcStride.saturated))
+        return failure();
+
+      if (!stride.saturated && !srcStride.saturated && stride != srcStride)
         return failure();
     }
   }
   return makeStridedLinearLayoutMap(resultStrides, srcOffset,
                                     srcType.getContext());
+}
+
+bool CollapseShapeOp::isGuaranteedCollapsible(
+    MemRefType srcType, ArrayRef<ReassociationIndices> reassociation) {
+  // MemRefs with standard layout are always collapsible.
+  if (srcType.getLayout().isIdentity())
+    return true;
+
+  return succeeded(computeCollapsedLayoutMap(srcType, reassociation,
+                                             /*strict=*/true));
 }
 
 static MemRefType

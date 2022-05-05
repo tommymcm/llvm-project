@@ -615,11 +615,11 @@ private:
   SDNodeFlags Flags;
 
 public:
-  /// Unique and persistent id per SDNode in the DAG.
-  /// Used for debug printing.
-#if LLVM_ENABLE_ABI_BREAKING_CHECKS
+  /// Unique and persistent id per SDNode in the DAG. Used for debug printing.
+  /// We do not place that under `#if LLVM_ENABLE_ABI_BREAKING_CHECKS`
+  /// intentionally because it adds unneeded complexity without noticeable
+  /// benefits (see discussion with @thakis in D120714).
   uint16_t PersistentId;
-#endif
 
   //===--------------------------------------------------------------------===//
   //  Accessors
@@ -1222,9 +1222,7 @@ public:
     : SDNode(ISD::HANDLENODE, 0, DebugLoc(), getSDVTList(MVT::Other)) {
     // HandleSDNodes are never inserted into the DAG, so they won't be
     // auto-numbered. Use ID 65535 as a sentinel.
-#if LLVM_ENABLE_ABI_BREAKING_CHECKS
     PersistentId = 0xffff;
-#endif
 
     // Manually set up the operand list. This node type is special in that it's
     // always stack allocated and SelectionDAG does not manage its operands.
@@ -1689,6 +1687,11 @@ SDValue peekThroughExtractSubvectors(SDValue V);
 /// Returns true if \p V is a bitwise not operation. Assumes that an all ones
 /// constant is canonicalized to be operand 1.
 bool isBitwiseNot(SDValue V, bool AllowUndefs = false);
+
+/// If \p V is a bitwise not, returns the inverted operand. Otherwise returns
+/// an empty SDValue. Only bits set in \p Mask are required to be inverted,
+/// other bits may be arbitrary.
+SDValue getBitwiseNotOperand(SDValue V, SDValue Mask, bool AllowUndefs);
 
 /// Returns the SDNode if it is a constant splat BuildVector or constant int.
 ConstantSDNode *isConstOrConstSplat(SDValue N, bool AllowUndefs = false,

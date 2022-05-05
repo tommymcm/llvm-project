@@ -1589,9 +1589,14 @@ int64_t DynamicReloc::computeAddend() const {
 }
 
 uint32_t DynamicReloc::getSymIndex(SymbolTableBaseSection *symTab) const {
-  if (needsDynSymIndex())
-    return symTab->getSymbolIndex(sym);
-  return 0;
+  if (!needsDynSymIndex())
+    return 0;
+
+  size_t index = symTab->getSymbolIndex(sym);
+  assert((index != 0 || type != target->gotRel && type != target->pltRel ||
+          !mainPart->dynSymTab->getParent()) &&
+         "GOT or PLT relocation must refer to symbol in dynamic symbol table");
+  return index;
 }
 
 RelocationBaseSection::RelocationBaseSection(StringRef name, uint32_t type,
@@ -3712,7 +3717,7 @@ static uint8_t getAbiVersion() {
     return 0;
   }
 
-  if (config->emachine == EM_AMDGPU) {
+  if (config->emachine == EM_AMDGPU && !objectFiles.empty()) {
     uint8_t ver = objectFiles[0]->abiVersion;
     for (InputFile *file : makeArrayRef(objectFiles).slice(1))
       if (file->abiVersion != ver)

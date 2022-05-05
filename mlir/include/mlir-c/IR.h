@@ -126,7 +126,7 @@ mlirContextGetNumLoadedDialects(MlirContext context);
 MLIR_CAPI_EXPORTED MlirDialect mlirContextGetOrLoadDialect(MlirContext context,
                                                            MlirStringRef name);
 
-/// Set threading mode (must be set to false to print-ir-after-all).
+/// Set threading mode (must be set to false to mlir-print-ir-after-all).
 MLIR_CAPI_EXPORTED void mlirContextEnableMultithreading(MlirContext context,
                                                         bool enable);
 
@@ -557,6 +557,9 @@ MLIR_CAPI_EXPORTED MlirBlock mlirBlockCreate(intptr_t nArgs,
 
 /// Takes a block owned by the caller and destroys it.
 MLIR_CAPI_EXPORTED void mlirBlockDestroy(MlirBlock block);
+
+/// Detach a block from the owning region and assume ownership.
+MLIR_CAPI_EXPORTED void mlirBlockDetach(MlirBlock block);
 
 /// Checks whether a block is null.
 static inline bool mlirBlockIsNull(MlirBlock block) { return !block.ptr; }

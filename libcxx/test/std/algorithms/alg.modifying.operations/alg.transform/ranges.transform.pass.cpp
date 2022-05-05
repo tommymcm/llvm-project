@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <functional>
 #include <ranges>
 
 #include "test_iterators.h"
@@ -571,6 +572,7 @@ constexpr bool test() {
 
 int main(int, char**) {
   test_iterators_in1_in2<cpp17_output_iterator<int*>>();
+  test_iterators_in1_in2<cpp20_output_iterator<int*>>();
   test_iterators_in1_in2<forward_iterator<int*>>();
   test_iterators_in1_in2<bidirectional_iterator<int*>>();
   test_iterators_in1_in2<random_access_iterator<int*>>();

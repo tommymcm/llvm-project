@@ -33,7 +33,7 @@
 namespace clang {
 namespace dataflow {
 
-static const Expr *skipExprWithCleanups(const Expr *E) {
+const Expr *ignoreExprWithCleanups(const Expr *E) {
   if (auto *C = dyn_cast_or_null<ExprWithCleanups>(E))
     return C->getSubExpr();
   return E;
@@ -155,9 +155,7 @@ public:
       return;
     }
 
-    // The CFG does not contain `ParenExpr` as top-level statements in basic
-    // blocks, however sub-expressions can still be of that type.
-    InitExpr = skipExprWithCleanups(D.getInit()->IgnoreParens());
+    InitExpr = ignoreExprWithCleanups(D.getInit());
     assert(InitExpr != nullptr);
 
     if (D.getType()->isReferenceType()) {
@@ -168,34 +166,29 @@ public:
         auto &Val =
             Env.takeOwnership(std::make_unique<ReferenceValue>(*InitExprLoc));
         Env.setValue(Loc, Val);
-      } else {
-        // FIXME: The initializer expression must always be assigned a value.
-        // Replace this with an assert when we have sufficient coverage of
-        // language features.
-        if (Value *Val = Env.createValue(D.getType()))
-          Env.setValue(Loc, *Val);
+        return;
       }
+    } else if (auto *InitExprVal = Env.getValue(*InitExpr, SkipPast::None)) {
+      Env.setValue(Loc, *InitExprVal);
       return;
     }
 
-    if (auto *InitExprVal = Env.getValue(*InitExpr, SkipPast::None)) {
-      Env.setValue(Loc, *InitExprVal);
-    } else if (!D.getType()->isStructureOrClassType()) {
-      // FIXME: The initializer expression must always be assigned a value.
-      // Replace this with an assert when we have sufficient coverage of
-      // language features.
-      if (Value *Val = Env.createValue(D.getType()))
-        Env.setValue(Loc, *Val);
-    } else {
-      llvm_unreachable("structs and classes must always be assigned values");
-    }
+    // We arrive here in (the few) cases where an expression is intentionally
+    // "uninterpreted". There are two ways to handle this situation: propagate
+    // the status, so that uninterpreted initializers result in uninterpreted
+    // variables, or provide a default value. We choose the latter so that later
+    // refinements of the variable can be used for reasoning about the
+    // surrounding code.
+    //
+    // FIXME. If and when we interpret all language cases, change this to assert
+    // that `InitExpr` is interpreted, rather than supplying a default value
+    // (assuming we don't update the environment API to return references).
+    if (Value *Val = Env.createValue(D.getType()))
+      Env.setValue(Loc, *Val);
   }
 
   void VisitImplicitCastExpr(const ImplicitCastExpr *S) {
-    // The CFG does not contain `ParenExpr` as top-level statements in basic
-    // blocks, however sub-expressions can still be of that type.
-    assert(S->getSubExpr() != nullptr);
-    const Expr *SubExpr = S->getSubExpr()->IgnoreParens();
+    const Expr *SubExpr = S->getSubExpr();
     assert(SubExpr != nullptr);
 
     switch (S->getCastKind()) {
@@ -254,10 +247,7 @@ public:
   }
 
   void VisitUnaryOperator(const UnaryOperator *S) {
-    // The CFG does not contain `ParenExpr` as top-level statements in basic
-    // blocks, however sub-expressions can still be of that type.
-    assert(S->getSubExpr() != nullptr);
-    const Expr *SubExpr = S->getSubExpr()->IgnoreParens();
+    const Expr *SubExpr = S->getSubExpr();
     assert(SubExpr != nullptr);
 
     switch (S->getOpcode()) {
@@ -446,9 +436,6 @@ public:
 
   void VisitCXXFunctionalCastExpr(const CXXFunctionalCastExpr *S) {
     if (S->getCastKind() == CK_ConstructorConversion) {
-      // The CFG does not contain `ParenExpr` as top-level statements in basic
-      // blocks, however sub-expressions can still be of that type.
-      assert(S->getSubExpr() != nullptr);
       const Expr *SubExpr = S->getSubExpr();
       assert(SubExpr != nullptr);
 
@@ -606,7 +593,7 @@ private:
 };
 
 void transfer(const StmtToEnvMap &StmtToEnv, const Stmt &S, Environment &Env) {
-  assert(!isa<ParenExpr>(&S));
+  assert(!(isa<ParenExpr, ExprWithCleanups>(&S)));
   TransferVisitor(StmtToEnv, Env).Visit(&S);
 }
 
