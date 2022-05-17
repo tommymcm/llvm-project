@@ -1790,7 +1790,7 @@ def GraphRegionOp : TEST_Op<"graph_region",  [
   }];
 
   let regions = (region AnyRegion:$region);
-  let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = "attr-dict-with-keyword $region";
 }
 
 def AffineScopeOp : TEST_Op<"affine_scope", [AffineScope]> {
@@ -2245,6 +2245,12 @@ def FormatCustomDirectiveAttrDict
   let assemblyFormat = [{
     custom<CustomDirectiveAttrDict>( attr-dict )
   }];
+}
+
+def FormatLiteralFollowingOptionalGroup
+    : TEST_Op<"format_literal_following_optional_group"> {
+  let arguments = (ins TypeAttr:$type, OptionalAttr<AnyAttr>:$value);
+  let assemblyFormat = "(`(` $value^ `)`)? `:` $type attr-dict";
 }
 
 //===----------------------------------------------------------------------===//

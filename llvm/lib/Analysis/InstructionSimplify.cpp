@@ -2219,6 +2219,15 @@ static Value *SimplifyAndInst(Value *Op0, Value *Op1, const SimplifyQuery &Q,
       match(Op1, m_c_Xor(m_Specific(Or), m_Specific(Y))))
     return Constant::getNullValue(Op0->getType());
 
+  if (Op0->getType()->isIntOrIntVectorTy(1)) {
+    // Op0&Op1 -> Op0 where Op0 implies Op1
+    if (isImpliedCondition(Op0, Op1, Q.DL).getValueOr(false))
+      return Op0;
+    // Op0&Op1 -> Op1 where Op1 implies Op0
+    if (isImpliedCondition(Op1, Op0, Q.DL).getValueOr(false))
+      return Op1;
+  }
+
   return nullptr;
 }
 
@@ -2450,6 +2459,15 @@ static Value *SimplifyOrInst(Value *Op0, Value *Op1, const SimplifyQuery &Q,
   if (isa<PHINode>(Op0) || isa<PHINode>(Op1))
     if (Value *V = ThreadBinOpOverPHI(Instruction::Or, Op0, Op1, Q, MaxRecurse))
       return V;
+
+  if (Op0->getType()->isIntOrIntVectorTy(1)) {
+    // Op0|Op1 -> Op1 where Op0 implies Op1
+    if (isImpliedCondition(Op0, Op1, Q.DL).getValueOr(false))
+      return Op1;
+    // Op0|Op1 -> Op0 where Op1 implies Op0
+    if (isImpliedCondition(Op1, Op0, Q.DL).getValueOr(false))
+      return Op0;
+  }
 
   return nullptr;
 }
@@ -2723,12 +2741,14 @@ computePointerICmp(CmpInst::Predicate Pred, Value *LHS, Value *RHS,
       uint64_t LHSSize, RHSSize;
       ObjectSizeOpts Opts;
       Opts.EvalMode = ObjectSizeOpts::Mode::Min;
-      auto *F = [](Value *V) {
+      auto *F = [](Value *V) -> Function * {
         if (auto *I = dyn_cast<Instruction>(V))
           return I->getFunction();
-        return cast<Argument>(V)->getParent();
+        if (auto *A = dyn_cast<Argument>(V))
+          return A->getParent();
+        return nullptr;
       }(LHS);
-      Opts.NullIsUnknownSize = NullPointerIsDefined(F);
+      Opts.NullIsUnknownSize = F ? NullPointerIsDefined(F) : true;
       if (getObjectSize(LHS, LHSSize, DL, TLI, Opts) &&
           getObjectSize(RHS, RHSSize, DL, TLI, Opts) &&
           !LHSOffset.isNegative() && !RHSOffset.isNegative() &&
@@ -6227,6 +6247,15 @@ Value *llvm::SimplifyCall(CallBase *Call, const SimplifyQuery &Q) {
     if (Value *Ret = simplifyIntrinsic(Call, Q))
       return Ret;
 
+  return nullptr;
+}
+
+Value *llvm::SimplifyConstrainedFPCall(CallBase *Call, const SimplifyQuery &Q) {
+  assert(isa<ConstrainedFPIntrinsic>(Call));
+  if (Value *V = tryConstantFoldCall(Call, Q))
+    return V;
+  if (Value *Ret = simplifyIntrinsic(Call, Q))
+    return Ret;
   return nullptr;
 }
 

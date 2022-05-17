@@ -1222,6 +1222,10 @@ public:
                                       uint64_t Range, ProfileSummaryInfo *PSI,
                                       BlockFrequencyInfo *BFI) const;
 
+  /// Returns preferred type for switch condition.
+  virtual MVT getPreferredSwitchConditionType(LLVMContext &Context,
+                                              EVT ConditionVT) const;
+
   /// Return true if lowering to a bit test is suitable for a set of case
   /// clusters which contains \p NumDests unique destinations, \p Low and
   /// \p High as its lowest and highest case values, and expects \p NumCmps
@@ -2278,6 +2282,12 @@ protected:
     }
   }
 
+  void setLoadExtAction(ArrayRef<unsigned> ExtTypes, MVT ValVT,
+                        ArrayRef<MVT> MemVTs, LegalizeAction Action) {
+    for (auto MemVT : MemVTs)
+      setLoadExtAction(ExtTypes, ValVT, MemVT, Action);
+  }
+
   /// Indicate that the specified truncating store does not work with the
   /// specified type and indicate what to do about it.
   void setTruncStoreAction(MVT ValVT, MVT MemVT, LegalizeAction Action) {
@@ -2290,8 +2300,16 @@ protected:
   ///
   /// NOTE: All indexed mode loads are initialized to Expand in
   /// TargetLowering.cpp
-  void setIndexedLoadAction(unsigned IdxMode, MVT VT, LegalizeAction Action) {
-    setIndexedModeAction(IdxMode, VT, IMAB_Load, Action);
+  void setIndexedLoadAction(ArrayRef<unsigned> IdxModes, MVT VT,
+                            LegalizeAction Action) {
+    for (auto IdxMode : IdxModes)
+      setIndexedModeAction(IdxMode, VT, IMAB_Load, Action);
+  }
+
+  void setIndexedLoadAction(ArrayRef<unsigned> IdxModes, ArrayRef<MVT> VTs,
+                            LegalizeAction Action) {
+    for (auto VT : VTs)
+      setIndexedLoadAction(IdxModes, VT, Action);
   }
 
   /// Indicate that the specified indexed store does or does not work with the
@@ -2299,8 +2317,16 @@ protected:
   ///
   /// NOTE: All indexed mode stores are initialized to Expand in
   /// TargetLowering.cpp
-  void setIndexedStoreAction(unsigned IdxMode, MVT VT, LegalizeAction Action) {
-    setIndexedModeAction(IdxMode, VT, IMAB_Store, Action);
+  void setIndexedStoreAction(ArrayRef<unsigned> IdxModes, MVT VT,
+                             LegalizeAction Action) {
+    for (auto IdxMode : IdxModes)
+      setIndexedModeAction(IdxMode, VT, IMAB_Store, Action);
+  }
+
+  void setIndexedStoreAction(ArrayRef<unsigned> IdxModes, ArrayRef<MVT> VTs,
+                             LegalizeAction Action) {
+    for (auto VT : VTs)
+      setIndexedStoreAction(IdxModes, VT, Action);
   }
 
   /// Indicate that the specified indexed masked load does or does not work with
@@ -3482,9 +3508,10 @@ public:
   /// Return true if the number of memory ops is below the threshold (Limit).
   /// It returns the types of the sequence of memory ops to perform
   /// memset / memcpy by reference.
-  bool findOptimalMemOpLowering(std::vector<EVT> &MemOps, unsigned Limit,
-                                const MemOp &Op, unsigned DstAS, unsigned SrcAS,
-                                const AttributeList &FuncAttributes) const;
+  virtual bool
+  findOptimalMemOpLowering(std::vector<EVT> &MemOps, unsigned Limit,
+                           const MemOp &Op, unsigned DstAS, unsigned SrcAS,
+                           const AttributeList &FuncAttributes) const;
 
   /// Check to see if the specified operand of the specified instruction is a
   /// constant integer.  If so, check to see if there are any bits set in the
@@ -4863,10 +4890,6 @@ public:
   // fact that this can be implemented as a ctlz/srl pair, so that the dag
   // combiner can fold the new nodes.
   SDValue lowerCmpEqZeroToCtlzSrl(SDValue Op, SelectionDAG &DAG) const;
-
-  /// Give targets the chance to reduce the number of distinct addresing modes.
-  ISD::MemIndexType getCanonicalIndexType(ISD::MemIndexType IndexType,
-                                          EVT MemVT, SDValue Offsets) const;
 
 private:
   SDValue foldSetCCWithAnd(EVT VT, SDValue N0, SDValue N1, ISD::CondCode Cond,

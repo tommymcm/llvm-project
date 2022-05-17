@@ -172,7 +172,7 @@ public:
   Instruction *visitLandingPadInst(LandingPadInst &LI);
   Instruction *visitVAEndInst(VAEndInst &I);
   Value *pushFreezeToPreventPoisonFromPropagating(FreezeInst &FI);
-  bool freezeDominatedUses(FreezeInst &FI);
+  bool freezeOtherUses(FreezeInst &FI);
   Instruction *visitFreeze(FreezeInst &I);
 
   /// Specify what to return for unhandled instructions.
@@ -655,6 +655,8 @@ public:
 
   Instruction *foldGEPICmp(GEPOperator *GEPLHS, Value *RHS,
                            ICmpInst::Predicate Cond, Instruction &I);
+  Instruction *foldSelectICmp(ICmpInst::Predicate Pred, SelectInst *SI,
+                              Value *RHS, const ICmpInst &I);
   Instruction *foldAllocaCmp(ICmpInst &ICI, const AllocaInst *Alloca);
   Instruction *foldCmpLoadFromIndexedGlobal(LoadInst *LI,
                                             GetElementPtrInst *GEP,
@@ -680,6 +682,8 @@ public:
 
   Value *foldMultiplicationOverflowCheck(ICmpInst &Cmp);
 
+  Instruction *foldICmpBinOpWithConstant(ICmpInst &Cmp, BinaryOperator *BO,
+                                         const APInt &C);
   Instruction *foldICmpSelectConstant(ICmpInst &Cmp, SelectInst *Select,
                                       ConstantInt *C);
   Instruction *foldICmpTruncConstant(ICmpInst &Cmp, TruncInst *Trunc,

@@ -6,7 +6,7 @@
 // RUN: mlir-opt %s -one-shot-bufferize="allow-return-allocs test-analysis-only analysis-fuzzer-seed=91 bufferize-function-boundaries" -split-input-file -o /dev/null
 
 // Test bufferization using memref types that have no layout map.
-// RUN: mlir-opt %s -one-shot-bufferize="allow-return-allocs fully-dynamic-layout-maps=0 bufferize-function-boundaries" -split-input-file | FileCheck %s --check-prefix=CHECK-NO-LAYOUT-MAP
+// RUN: mlir-opt %s -one-shot-bufferize="allow-return-allocs unknown-type-conversion=identity-layout-map function-boundary-type-conversion=identity-layout-map bufferize-function-boundaries" -split-input-file | FileCheck %s --check-prefix=CHECK-NO-LAYOUT-MAP
 
 // TODO: Some test cases from this file should be moved to other dialects.
 
@@ -359,3 +359,19 @@ func.func @depthwise_conv_1d_nwc_wc(%arg0: index, %arg1: index, %arg2: tensor<8x
   return %3 : tensor<?x1x6x8xf32>
 }
 
+// -----
+
+// CHECK-LABEL: func @do_not_copy_init_tensors(
+func.func @do_not_copy_init_tensors(%f1: f32, %f2: f32, %idx: index)
+  -> (tensor<5xf32>, tensor<5xf32>)
+{
+  // CHECK: memref.alloc
+  // CHECK: memref.alloc
+  // CHECK-NOT: copy
+  // CHECK: memref.store
+  // CHECK: memref.store
+  %0 = linalg.init_tensor [5] : tensor<5xf32>
+  %1 = tensor.insert %f1 into %0[%idx] : tensor<5xf32>
+  %2 = tensor.insert %f2 into %0[%idx] : tensor<5xf32>
+  return %1, %2 : tensor<5xf32>, tensor<5xf32>
+}

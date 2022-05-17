@@ -77,6 +77,7 @@ set(files
   __algorithm/ranges_find_if_not.h
   __algorithm/ranges_for_each.h
   __algorithm/ranges_for_each_n.h
+  __algorithm/ranges_is_partitioned.h
   __algorithm/ranges_max.h
   __algorithm/ranges_max_element.h
   __algorithm/ranges_min.h
@@ -253,6 +254,8 @@ set(files
   __functional/unary_negate.h
   __functional/unwrap_ref.h
   __functional/weak_result_type.h
+  __fwd/span.h
+  __fwd/string_view.h
   __hash_table
   __ios/fpos.h
   __iterator/access.h
@@ -562,6 +565,7 @@ set(files
   span
   sstream
   stack
+  stdatomic.h
   stdbool.h
   stddef.h
   stdexcept
@@ -608,7 +612,8 @@ endforeach()
 add_custom_target(generate-cxx-headers ALL DEPENDS ${_all_includes})
 
 add_library(cxx-headers INTERFACE)
-add_dependencies(cxx-headers generate-cxx-headers ${LIBCXX_CXX_ABI_HEADER_TARGET})
+target_link_libraries(cxx-headers INTERFACE libcxx-abi-headers)
+add_dependencies(cxx-headers generate-cxx-headers)
 # TODO: Use target_include_directories once we figure out why that breaks the runtimes build
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC" OR "${CMAKE_CXX_SIMULATE_ID}" STREQUAL "MSVC")
   target_compile_options(cxx-headers INTERFACE /I${LIBCXX_GENERATED_INCLUDE_DIR}
