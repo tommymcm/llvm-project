@@ -77,12 +77,6 @@ VScaleVal LMULType::getScale(unsigned ElementBitwidth) const {
 
 void LMULType::MulLog2LMUL(int log2LMUL) { Log2LMUL += log2LMUL; }
 
-LMULType &LMULType::operator*=(uint32_t RHS) {
-  assert(isPowerOf2_32(RHS));
-  this->Log2LMUL = this->Log2LMUL + Log2_32(RHS);
-  return *this;
-}
-
 RVVType::RVVType(BasicType BT, int Log2LMUL,
                  const PrototypeDescriptor &prototype)
     : BT(BT), LMUL(LMULType(Log2LMUL)) {
@@ -628,17 +622,17 @@ void RVVType::applyModifier(const PrototypeDescriptor &Transformer) {
   switch (static_cast<VectorTypeModifier>(Transformer.VTM)) {
   case VectorTypeModifier::Widening2XVector:
     ElementBitwidth *= 2;
-    LMUL *= 2;
+    LMUL.MulLog2LMUL(1);
     Scale = LMUL.getScale(ElementBitwidth);
     break;
   case VectorTypeModifier::Widening4XVector:
     ElementBitwidth *= 4;
-    LMUL *= 4;
+    LMUL.MulLog2LMUL(2);
     Scale = LMUL.getScale(ElementBitwidth);
     break;
   case VectorTypeModifier::Widening8XVector:
     ElementBitwidth *= 8;
-    LMUL *= 8;
+    LMUL.MulLog2LMUL(3);
     Scale = LMUL.getScale(ElementBitwidth);
     break;
   case VectorTypeModifier::MaskVector:
@@ -797,13 +791,13 @@ void RVVType::applyFixedLog2LMUL(int Log2LMUL, enum FixedLMULType Type) {
 
 Optional<RVVTypes>
 RVVType::computeTypes(BasicType BT, int Log2LMUL, unsigned NF,
-                      ArrayRef<PrototypeDescriptor> PrototypeSeq) {
+                      ArrayRef<PrototypeDescriptor> Prototype) {
   // LMUL x NF must be less than or equal to 8.
   if ((Log2LMUL >= 1) && (1 << Log2LMUL) * NF > 8)
     return llvm::None;
 
   RVVTypes Types;
-  for (const PrototypeDescriptor &Proto : PrototypeSeq) {
+  for (const PrototypeDescriptor &Proto : Prototype) {
     auto T = computeType(BT, Log2LMUL, Proto);
     if (!T.hasValue())
       return llvm::None;
@@ -853,8 +847,8 @@ Optional<RVVTypePtr> RVVType::computeType(BasicType BT, int Log2LMUL,
 // RVVIntrinsic implementation
 //===----------------------------------------------------------------------===//
 RVVIntrinsic::RVVIntrinsic(
-    StringRef NewName, StringRef Suffix, StringRef NewMangledName,
-    StringRef MangledSuffix, StringRef IRName, bool IsMasked,
+    StringRef NewName, StringRef Suffix, StringRef NewOverloadedName,
+    StringRef OverloadedSuffix, StringRef IRName, bool IsMasked,
     bool HasMaskedOffOperand, bool HasVL, PolicyScheme Scheme,
     bool HasUnMaskedOverloaded, bool HasBuiltinAlias, StringRef ManualCodegen,
     const RVVTypes &OutInTypes, const std::vector<int64_t> &NewIntrinsicTypes,
@@ -864,17 +858,17 @@ RVVIntrinsic::RVVIntrinsic(
       HasBuiltinAlias(HasBuiltinAlias), ManualCodegen(ManualCodegen.str()),
       NF(NF) {
 
-  // Init BuiltinName, Name and MangledName
+  // Init BuiltinName, Name and OverloadedName
   BuiltinName = NewName.str();
   Name = BuiltinName;
-  if (NewMangledName.empty())
-    MangledName = NewName.split("_").first.str();
+  if (NewOverloadedName.empty())
+    OverloadedName = NewName.split("_").first.str();
   else
-    MangledName = NewMangledName.str();
+    OverloadedName = NewOverloadedName.str();
   if (!Suffix.empty())
     Name += "_" + Suffix.str();
-  if (!MangledSuffix.empty())
-    MangledName += "_" + MangledSuffix.str();
+  if (!OverloadedSuffix.empty())
+    OverloadedName += "_" + OverloadedSuffix.str();
   if (IsMasked) {
     BuiltinName += "_m";
     Name += "_m";
@@ -928,7 +922,7 @@ std::string RVVIntrinsic::getBuiltinTypeStr() const {
 
 std::string RVVIntrinsic::getSuffixStr(
     BasicType Type, int Log2LMUL,
-    const llvm::SmallVector<PrototypeDescriptor> &PrototypeDescriptors) {
+    llvm::ArrayRef<PrototypeDescriptor> PrototypeDescriptors) {
   SmallVector<std::string> SuffixStrs;
   for (auto PD : PrototypeDescriptors) {
     auto T = RVVType::computeType(Type, Log2LMUL, PD);

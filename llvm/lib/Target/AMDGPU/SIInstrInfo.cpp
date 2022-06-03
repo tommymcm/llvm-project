@@ -385,6 +385,8 @@ bool SIInstrInfo::getMemOperandsWithOffsetWidth(
     DataOpIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst);
     if (DataOpIdx == -1)
       DataOpIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdata);
+    if (DataOpIdx == -1) // LDS DMA
+      return false;
     Width = getOpSize(LdSt, DataOpIdx);
     return true;
   }
@@ -433,6 +435,8 @@ bool SIInstrInfo::getMemOperandsWithOffsetWidth(
     DataOpIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst);
     if (DataOpIdx == -1)
       DataOpIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdata);
+    if (DataOpIdx == -1) // LDS DMA
+      return false;
     Width = getOpSize(LdSt, DataOpIdx);
     return true;
   }
@@ -2883,23 +2887,6 @@ bool SIInstrInfo::isFoldableCopy(const MachineInstr &MI) {
   }
 }
 
-unsigned SIInstrInfo::getAddressSpaceForPseudoSourceKind(
-    unsigned Kind) const {
-  switch(Kind) {
-  case PseudoSourceValue::Stack:
-  case PseudoSourceValue::FixedStack:
-    return AMDGPUAS::PRIVATE_ADDRESS;
-  case PseudoSourceValue::ConstantPool:
-  case PseudoSourceValue::GOT:
-  case PseudoSourceValue::JumpTable:
-  case PseudoSourceValue::GlobalValueCallEntry:
-  case PseudoSourceValue::ExternalSymbolCallEntry:
-  case PseudoSourceValue::TargetCustom:
-    return AMDGPUAS::CONSTANT_ADDRESS;
-  }
-  return AMDGPUAS::FLAT_ADDRESS;
-}
-
 static constexpr unsigned ModifierOpNames[] = {
     AMDGPU::OpName::src0_modifiers, AMDGPU::OpName::src1_modifiers,
     AMDGPU::OpName::src2_modifiers, AMDGPU::OpName::clamp,
@@ -4248,8 +4235,12 @@ bool SIInstrInfo::verifyInstruction(const MachineInstr &MI,
     bool UsesLiteral = false;
     const MachineOperand *LiteralVal = nullptr;
 
-    if (AMDGPU::getNamedOperandIdx(Opcode, AMDGPU::OpName::imm) != -1)
+    int ImmIdx = AMDGPU::getNamedOperandIdx(Opcode, AMDGPU::OpName::imm);
+    if (ImmIdx != -1) {
       ++ConstantBusCount;
+      UsesLiteral = true;
+      LiteralVal = &MI.getOperand(ImmIdx);
+    }
 
     SmallVector<Register, 2> SGPRsUsed;
     Register SGPRUsed;
@@ -4276,8 +4267,8 @@ bool SIInstrInfo::verifyInstruction(const MachineInstr &MI,
             UsesLiteral = true;
             LiteralVal = &MO;
           } else if (!MO.isIdenticalTo(*LiteralVal)) {
-            assert(isVOP3(MI));
-            ErrInfo = "VOP3 instruction uses more than one literal";
+            assert(isVOP2(MI) || isVOP3(MI));
+            ErrInfo = "VOP2/VOP3 instruction uses more than one literal";
             return false;
           }
         }
@@ -4362,16 +4353,11 @@ bool SIInstrInfo::verifyInstruction(const MachineInstr &MI,
   if (isSOP2(MI) || isSOPC(MI)) {
     const MachineOperand &Src0 = MI.getOperand(Src0Idx);
     const MachineOperand &Src1 = MI.getOperand(Src1Idx);
-    unsigned Immediates = 0;
 
-    if (!Src0.isReg() &&
-        !isInlineConstant(Src0, Desc.OpInfo[Src0Idx].OperandType))
-      Immediates++;
-    if (!Src1.isReg() &&
-        !isInlineConstant(Src1, Desc.OpInfo[Src1Idx].OperandType))
-      Immediates++;
-
-    if (Immediates > 1) {
+    if (!Src0.isReg() && !Src1.isReg() &&
+        !isInlineConstant(Src0, Desc.OpInfo[Src0Idx].OperandType) &&
+        !isInlineConstant(Src1, Desc.OpInfo[Src1Idx].OperandType) &&
+        !Src0.isIdenticalTo(Src1)) {
       ErrInfo = "SOP2/SOPC instruction requires too many immediate constants";
       return false;
     }
@@ -4616,25 +4602,36 @@ bool SIInstrInfo::verifyInstruction(const MachineInstr &MI,
     }
   }
 
-  if (ST.needsAlignedVGPRs() &&
-      (MI.getOpcode() == AMDGPU::DS_GWS_INIT ||
-       MI.getOpcode() == AMDGPU::DS_GWS_SEMA_BR ||
-       MI.getOpcode() == AMDGPU::DS_GWS_BARRIER)) {
-    const MachineOperand *Op = getNamedOperand(MI, AMDGPU::OpName::data0);
-    Register Reg = Op->getReg();
-    bool Aligned = true;
-    if (Reg.isPhysical()) {
-      Aligned = !(RI.getHWRegIndex(Reg) & 1);
-    } else {
+  if (ST.needsAlignedVGPRs()) {
+    const auto isAlignedReg = [&MI, &MRI, this](unsigned OpName) -> bool {
+      const MachineOperand *Op = getNamedOperand(MI, OpName);
+      if (!Op)
+        return true;
+      Register Reg = Op->getReg();
+      if (Reg.isPhysical())
+        return !(RI.getHWRegIndex(Reg) & 1);
       const TargetRegisterClass &RC = *MRI.getRegClass(Reg);
-      Aligned = RI.getRegSizeInBits(RC) > 32 && RI.isProperlyAlignedRC(RC) &&
-                !(RI.getChannelFromSubReg(Op->getSubReg()) & 1);
+      return RI.getRegSizeInBits(RC) > 32 && RI.isProperlyAlignedRC(RC) &&
+             !(RI.getChannelFromSubReg(Op->getSubReg()) & 1);
+    };
+
+    if (MI.getOpcode() == AMDGPU::DS_GWS_INIT ||
+        MI.getOpcode() == AMDGPU::DS_GWS_SEMA_BR ||
+        MI.getOpcode() == AMDGPU::DS_GWS_BARRIER) {
+
+      if (!isAlignedReg(AMDGPU::OpName::data0)) {
+        ErrInfo = "Subtarget requires even aligned vector registers "
+                  "for DS_GWS instructions";
+        return false;
+      }
     }
 
-    if (!Aligned) {
-      ErrInfo = "Subtarget requires even aligned vector registers "
-                "for DS_GWS instructions";
-      return false;
+    if (isMIMG(MI)) {
+      if (!isAlignedReg(AMDGPU::OpName::vaddr)) {
+        ErrInfo = "Subtarget requires even aligned vector registers "
+                  "for vaddr operand of image instructions";
+        return false;
+      }
     }
   }
 
@@ -4962,9 +4959,9 @@ bool SIInstrInfo::isOperandLegal(const MachineInstr &MI, unsigned OpIdx,
     MO = &MI.getOperand(OpIdx);
 
   int ConstantBusLimit = ST.getConstantBusLimit(MI.getOpcode());
-  int VOP3LiteralLimit = ST.hasVOP3Literal() ? 1 : 0;
+  int LiteralLimit = !isVOP3(MI) || ST.hasVOP3Literal() ? 1 : 0;
   if (isVALU(MI) && usesConstantBus(MRI, *MO, OpInfo)) {
-    if (isVOP3(MI) && isLiteralConstantLike(*MO, OpInfo) && !VOP3LiteralLimit--)
+    if (isLiteralConstantLike(*MO, OpInfo) && !LiteralLimit--)
       return false;
 
     SmallDenseSet<RegSubRegPair> SGPRsUsed;
@@ -4983,12 +4980,10 @@ bool SIInstrInfo::isOperandLegal(const MachineInstr &MI, unsigned OpIdx,
             return false;
           SGPRsUsed.insert(SGPR);
         }
-      } else if (InstDesc.OpInfo[i].OperandType == AMDGPU::OPERAND_KIMM32) {
-        if (--ConstantBusLimit <= 0)
-          return false;
-      } else if (isVOP3(MI) && AMDGPU::isSISrcOperand(InstDesc, i) &&
-                 isLiteralConstantLike(Op, InstDesc.OpInfo[i])) {
-        if (!VOP3LiteralLimit--)
+      } else if (InstDesc.OpInfo[i].OperandType == AMDGPU::OPERAND_KIMM32 ||
+                 (AMDGPU::isSISrcOperand(InstDesc, i) &&
+                  isLiteralConstantLike(Op, InstDesc.OpInfo[i]))) {
+        if (!LiteralLimit--)
           return false;
         if (--ConstantBusLimit <= 0)
           return false;
@@ -8425,4 +8420,38 @@ bool SIInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, Register SrcReg,
   }
 
   return false;
+}
+
+void SIInstrInfo::enforceOperandRCAlignment(MachineInstr &MI,
+                                            unsigned OpName) const {
+  if (!ST.needsAlignedVGPRs())
+    return;
+
+  int OpNo = AMDGPU::getNamedOperandIdx(MI.getOpcode(), OpName);
+  if (OpNo < 0)
+    return;
+  MachineOperand &Op = MI.getOperand(OpNo);
+  if (getOpSize(MI, OpNo) > 4)
+    return;
+
+  // Add implicit aligned super-reg to force alignment on the data operand.
+  const DebugLoc &DL = MI.getDebugLoc();
+  MachineBasicBlock *BB = MI.getParent();
+  MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
+  Register DataReg = Op.getReg();
+  bool IsAGPR = RI.isAGPR(MRI, DataReg);
+  Register Undef = MRI.createVirtualRegister(
+      IsAGPR ? &AMDGPU::AGPR_32RegClass : &AMDGPU::VGPR_32RegClass);
+  BuildMI(*BB, MI, DL, get(AMDGPU::IMPLICIT_DEF), Undef);
+  Register NewVR =
+      MRI.createVirtualRegister(IsAGPR ? &AMDGPU::AReg_64_Align2RegClass
+                                       : &AMDGPU::VReg_64_Align2RegClass);
+  BuildMI(*BB, MI, DL, get(AMDGPU::REG_SEQUENCE), NewVR)
+      .addReg(DataReg, 0, Op.getSubReg())
+      .addImm(AMDGPU::sub0)
+      .addReg(Undef)
+      .addImm(AMDGPU::sub1);
+  Op.setReg(NewVR);
+  Op.setSubReg(AMDGPU::sub0);
+  MI.addOperand(MachineOperand::CreateReg(NewVR, false, true));
 }
